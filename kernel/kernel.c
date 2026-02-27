@@ -649,13 +649,27 @@ static int sys_close(unsigned int fd)
     return 0;
 }
 
+extern unsigned int exec_ret_esp;  /* defined in entry.asm; used by SYS_EXIT */
+
 static void syscall_dispatch(struct registers *r)
 {
     switch (r->eax) {
     case SYS_EXIT:
-        serial_print("[kernel] program exited\n");
-        /* halt until program loader is implemented */
-        for (;;) __asm__ volatile ("hlt");
+        serial_print("[exec] program exited\n");
+        /* Restore the kernel stack saved by exec_run() and return to
+         * program_exec() as if exec_run() returned normally.
+         * exec_ret_esp points at: edi, esi, ebx, ebp, retaddr (low→high). */
+        __asm__ volatile (
+            "mov %0, %%esp\n"
+            "pop %%edi\n"
+            "pop %%esi\n"
+            "pop %%ebx\n"
+            "pop %%ebp\n"
+            "sti\n"
+            "ret\n"
+            :
+            : "r"(exec_ret_esp)
+        );
         break;
     case SYS_WRITE:
         r->eax = (unsigned int)sys_write(r->ebx, (const char *)r->ecx, r->edx);
@@ -751,6 +765,52 @@ static unsigned int parse_uint(const unsigned char *s, int len)
     return n;
 }
 
+/* ============================================================
+ * Program loader
+ * ============================================================ */
+
+#define PROG_BASE     0x400000
+#define PROG_MAX_SIZE (256 * 1024)  /* 256 KB */
+
+extern void         exec_run(void);
+extern unsigned int exec_ret_esp;
+
+/* Returns pointer past prefix if s starts with prefix, else NULL. */
+static const char *str_strip_prefix(const char *s, const char *prefix)
+{
+    while (*prefix) {
+        if (*s++ != *prefix++) return 0;
+    }
+    return s;
+}
+
+static void program_exec(const char *filename)
+{
+    int n = fat16_read(filename, (unsigned char *)PROG_BASE, PROG_MAX_SIZE);
+    if (n <= 0) {
+        vga_print("exec: not found: ", COLOR_DEFAULT);
+        vga_print(filename, COLOR_DEFAULT);
+        vga_putchar('\n', COLOR_DEFAULT);
+        serial_print("[exec] not found: ");
+        serial_print(filename);
+        serial_putchar('\n');
+        return;
+    }
+    serial_print("[exec] running: ");
+    serial_print(filename);
+    serial_putchar('\n');
+
+    exec_run();
+
+    /* Arrives here either via normal `ret` from the program or via SYS_EXIT. */
+    vga_putchar('\n', COLOR_DEFAULT);
+    serial_print("[exec] done\n");
+}
+
+/* ============================================================
+ * Kernel entry point
+ * ============================================================ */
+
 void kernel_main(void)
 {
     serial_init();
@@ -793,22 +853,45 @@ void kernel_main(void)
         serial_print("[disk] error\n");
     }
 
-    serial_print("[kernel] entering keyboard loop\n");
+    serial_print("[kernel] ready\n");
     vga_print("> ", COLOR_PROMPT);
+
+    static char cmd[80];
+    int cmd_len = 0;
 
     for (;;) {
         status_bar_update();
 
         char c = kbd_getchar();
-        if (c == 0)
+        if (!c) continue;
+
+        if (c == '\b') {
+            if (cmd_len > 0) {
+                cmd_len--;
+                vga_putchar('\b', COLOR_DEFAULT);
+                serial_putchar('\b');
+            }
             continue;
+        }
 
         vga_putchar(c, COLOR_DEFAULT);
         serial_putchar(c);
 
-        if (c == '\n' || c == '\r') {
+        if (c == '\n') {
+            cmd[cmd_len] = '\0';
+            cmd_len = 0;
+
+            const char *fname = str_strip_prefix(cmd, "run ");
+            if (fname && *fname) {
+                program_exec(fname);
+            } else if (cmd[0]) {
+                vga_print("unknown command\n", COLOR_DEFAULT);
+            }
+
             vga_print("> ", COLOR_PROMPT);
             serial_print("> ");
+        } else if (cmd_len < (int)sizeof(cmd) - 1) {
+            cmd[cmd_len++] = c;
         }
     }
 }
