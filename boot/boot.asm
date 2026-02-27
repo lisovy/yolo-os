@@ -15,13 +15,12 @@ KERNEL_SECTORS  equ 16       ; Sectors to read (max 17 fit on track 0 after MBR)
 KERNEL_ADDR     equ 0x10000  ; Physical address of kernel in protected mode
 
 start:
-    cli
-    xor ax, ax
+    cli                     ; Disable interrupts for the entire boot sequence.
+    xor ax, ax              ; Interrupts stay OFF until a proper IDT is set up.
     mov ds, ax
     mov es, ax
     mov ss, ax
     mov sp, 0x7C00          ; Stack below bootloader
-    sti
 
     ; ------------------------------------------------------------------
     ; Load kernel from disk via BIOS INT 13h CHS read (AH=0x02)

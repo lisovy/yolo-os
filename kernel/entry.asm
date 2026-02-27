@@ -11,6 +11,7 @@ extern kernel_main
 section .text
 
 _start:
+    cli                 ; Ensure interrupts are off (no IDT is set up)
     call kernel_main
 .halt:
     cli
