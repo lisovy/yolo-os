@@ -16,7 +16,11 @@
 
 KERNEL_SEGMENT  equ 0x1000
 KERNEL_ADDR     equ 0x10000
-KERNEL_SECTORS  equ 32        ; 32 * 512 = 16 KB  (current kernel ~10 KB)
+; KERNEL_SECTORS is passed via -DKERNEL_SECTORS=N from the Makefile.
+; The fallback value here must match Makefile's KERNEL_SECTORS variable.
+%ifndef KERNEL_SECTORS
+KERNEL_SECTORS  equ 128
+%endif
 
 ; --- Byte 0: JMP short past the BPB ---
 jmp short bootloader_start

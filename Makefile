@@ -9,6 +9,11 @@ LD     := ld
 OBJCPY := objcopy
 QEMU   := qemu-system-i386
 
+# Number of 512-byte sectors reserved for the kernel (sector 0 = boot, sectors 1..N = kernel).
+# FAT16 starts at sector N+1.  Changing this single variable updates the bootloader,
+# the mkfs.fat reserved-sector count, and the build-time size check.
+KERNEL_SECTORS := 128
+
 # 32-bit freestanding build
 CFLAGS  := -m32 -ffreestanding -fno-pie -fno-stack-protector \
            -nostdlib -nostdinc -O2 -Wall -Wextra
@@ -32,7 +37,7 @@ all: $(DISK_IMG)
 # --- Bootloader -------------------------------------------------------
 
 $(BOOT_IDE): boot/boot_ide.asm
-	$(NASM) -f bin $< -o $@
+	$(NASM) -f bin -DKERNEL_SECTORS=$(KERNEL_SECTORS) $< -o $@
 
 # --- Kernel -----------------------------------------------------------
 
@@ -61,23 +66,27 @@ $(KERNEL): $(KELF)
 # disk.img holds both the bootloader/kernel and the FAT16 filesystem.
 #
 # Layout:
-#   Sector 0        : boot sector  (MBR + FAT16 BPB)
-#   Sectors 1-32    : kernel binary  (32 * 512 = 16 KB capacity)
-#   Sectors 33+     : FAT16 structures (FAT tables, root dir, data)
+#   Sector 0                    : boot sector  (MBR + FAT16 BPB)
+#   Sectors 1..KERNEL_SECTORS   : kernel binary
+#   Sectors KERNEL_SECTORS+1 .. : FAT16 structures (FAT tables, root dir, data)
 #
-# First-time creation: format with mkfs.fat -R 33 (33 reserved sectors).
-# Subsequent builds: only sector 0 and sectors 1-32 are updated;
-#                    FAT16 data (sectors 33+) is preserved.
-#
-# To reformat from scratch: make newdisk
+# KERNEL_SECTORS is the single variable controlling all three of the above.
+# To reformat from scratch (required when KERNEL_SECTORS changes): make newdisk
 
 $(DISK_IMG): $(KERNEL) $(BOOT_IDE)
+	@size=$$(wc -c < $(KERNEL)); \
+	 max=$$(($(KERNEL_SECTORS) * 512)); \
+	 if [ "$$size" -gt "$$max" ]; then \
+	   echo "ERROR: kernel $$size bytes > KERNEL_SECTORS=$(KERNEL_SECTORS) * 512 = $$max"; \
+	   echo "       Increase KERNEL_SECTORS in Makefile and run: make newdisk"; \
+	   exit 1; \
+	 fi
 	@if [ ! -f $@ ]; then \
 	    echo "[disk] creating fresh FAT16 image..."; \
 	    dd if=/dev/zero of=$@ bs=1M count=4 2>/dev/null; \
-	    mkfs.fat -F 16 -s 1 -n "YOLOOS" -R 33 $@; \
+	    mkfs.fat -F 16 -s 1 -n "YOLOOS" -R $$(($(KERNEL_SECTORS) + 1)) $@; \
 	fi
-	python3 scripts/patch_boot.py $@ $(BOOT_IDE)
+	bash scripts/patch_boot.sh $@ $(BOOT_IDE)
 	dd if=$(KERNEL) of=$@ bs=512 seek=1 conv=notrunc 2>/dev/null
 	@echo "[disk] $(DISK_IMG) updated (boot + kernel)"
 
@@ -95,8 +104,6 @@ run: $(DISK_IMG)
 
 # --- Cleanup ----------------------------------------------------------
 # disk.img is intentionally NOT removed by clean (holds persistent data).
-# Remove os.img if it exists from the previous floppy-based build.
 
 clean:
-	rm -f $(BOOT_IDE) $(KOBJS) $(KELF) $(KERNEL) os.img \
-	      boot/boot.bin
+	rm -f $(BOOT_IDE) $(KOBJS) $(KELF) $(KERNEL)
