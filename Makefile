@@ -61,7 +61,7 @@ $(OS_IMG): $(BOOT) $(KERNEL)
 # --- Run in QEMU ------------------------------------------------------
 
 run: $(OS_IMG)
-	$(QEMU) -drive file=$(OS_IMG),format=raw,if=floppy
+	$(QEMU) -drive file=$(OS_IMG),format=raw,if=floppy -serial stdio
 
 # --- Cleanup ----------------------------------------------------------
 

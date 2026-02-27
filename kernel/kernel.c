@@ -3,6 +3,8 @@
  *
  * Video:     VGA text mode — direct writes to memory at 0xB8000.
  *            BIOS interrupts are unavailable in 32-bit protected mode.
+ * Serial:    COM1 (0x3F8) mirrors all output; run QEMU with -serial stdio
+ *            to read it directly in the terminal.
  * Keyboard:  PS/2 polling via I/O ports 0x60 / 0x64.
  *            Scan code set 1, US QWERTY layout.
  */
@@ -21,6 +23,9 @@
 #define KBD_DATA    0x60
 #define KBD_STATUS  0x64
 
+/* COM1 serial port */
+#define COM1        0x3F8
+
 /* ============================================================
  * I/O port helpers
  * ============================================================ */
@@ -30,6 +35,41 @@ static inline unsigned char inb(unsigned short port)
     unsigned char val;
     __asm__ volatile ("inb %1, %0" : "=a"(val) : "Nd"(port));
     return val;
+}
+
+static inline void outb(unsigned short port, unsigned char val)
+{
+    __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+
+/* ============================================================
+ * COM1 serial driver (16550 UART)
+ * ============================================================ */
+
+static void serial_init(void)
+{
+    outb(COM1 + 1, 0x00);  /* disable interrupts          */
+    outb(COM1 + 3, 0x80);  /* enable DLAB (baud rate mode) */
+    outb(COM1 + 0, 0x03);  /* baud divisor lo: 38400 baud  */
+    outb(COM1 + 1, 0x00);  /* baud divisor hi              */
+    outb(COM1 + 3, 0x03);  /* 8 bits, no parity, 1 stop    */
+    outb(COM1 + 2, 0xC7);  /* enable FIFO, clear, 14-byte threshold */
+}
+
+static void serial_putchar(char c)
+{
+    /* Wait until transmit buffer is empty */
+    while (!(inb(COM1 + 5) & 0x20))
+        ;
+    if (c == '\n')
+        serial_putchar('\r');  /* CRLF for terminals */
+    outb(COM1, (unsigned char)c);
+}
+
+static void serial_print(const char *s)
+{
+    while (*s)
+        serial_putchar(*s++);
 }
 
 /* ============================================================
@@ -155,11 +195,18 @@ static char kbd_getchar(void)
 
 void kernel_main(void)
 {
+    serial_init();
+    serial_print("[kernel] started\n");
+
     vga_clear();
+    serial_print("[kernel] VGA cleared\n");
 
     vga_print("Hello, World!\n\n", COLOR_HELLO);
+    serial_print("[kernel] Hello, World!\n");
+
     vga_print("IBM PC x86 bare-metal kernel\n", COLOR_DEFAULT);
     vga_print("Type on the keyboard -- characters appear below:\n\n", COLOR_DEFAULT);
+    serial_print("[kernel] entering keyboard loop\n");
     vga_print("> ", COLOR_PROMPT);
 
     for (;;) {
@@ -168,9 +215,12 @@ void kernel_main(void)
             continue;
 
         vga_putchar(c, COLOR_DEFAULT);
+        serial_putchar(c);
 
         /* Print a new prompt after Enter */
-        if (c == '\n' || c == '\r')
+        if (c == '\n' || c == '\r') {
             vga_print("> ", COLOR_PROMPT);
+            serial_print("> ");
+        }
     }
 }
