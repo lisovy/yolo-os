@@ -79,6 +79,19 @@ static void serial_print(const char *s)
 static int cursor_col = 0;
 static int cursor_row = 0;
 
+/* VGA CRTC ports — update the blinking hardware cursor position */
+#define VGA_CRTC_INDEX  0x3D4
+#define VGA_CRTC_DATA   0x3D5
+
+static void vga_update_hw_cursor(void)
+{
+    unsigned short pos = (unsigned short)(cursor_row * VGA_COLS + cursor_col);
+    outb(VGA_CRTC_INDEX, 0x0F);
+    outb(VGA_CRTC_DATA,  (unsigned char)(pos & 0xFF));
+    outb(VGA_CRTC_INDEX, 0x0E);
+    outb(VGA_CRTC_DATA,  (unsigned char)(pos >> 8));
+}
+
 static void vga_clear(void)
 {
     volatile unsigned short *vga = (volatile unsigned short *)VGA_MEMORY;
@@ -89,6 +102,7 @@ static void vga_clear(void)
 
     cursor_col = 0;
     cursor_row = 0;
+    vga_update_hw_cursor();
 }
 
 static void vga_scroll(void)
@@ -138,6 +152,7 @@ static void vga_putchar(char c, unsigned char color)
 
     if (cursor_row >= VGA_ROWS)
         vga_scroll();
+    vga_update_hw_cursor();
 }
 
 static void vga_print(const char *s, unsigned char color)
