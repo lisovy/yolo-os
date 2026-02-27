@@ -120,7 +120,7 @@ $(DISK_IMG): $(KERNEL) $(BOOT_IDE) $(USER_BINS)
 	bash scripts/patch_boot.sh $@ $(BOOT_IDE)
 	dd if=$(KERNEL) of=$@ bs=512 seek=1 conv=notrunc 2>/dev/null
 	@for f in $(USER_BINS); do \
-	    name=$$(basename "$$f" | tr '[:lower:]' '[:upper:]'); \
+	    name=$$(basename "$$f"); \
 	    mcopy -o -i $@ "$$f" "::$$name"; \
 	    echo "[disk] installed $$name"; \
 	done

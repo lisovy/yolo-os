@@ -184,18 +184,31 @@ static void free_cluster_chain(u16 cluster)
 /*
  * Convert 11-byte FAT name (e.g. "HELLO   TXT") to a C string
  * (e.g. "HELLO.TXT").  dst must have room for at least 13 bytes.
+ *
+ * ntres is the NTRes byte (dir entry offset 12):
+ *   bit 3 (0x08): display base name in lowercase
+ *   bit 4 (0x10): display extension in lowercase
+ * mtools sets these bits when copying 8.3-compatible lowercase filenames.
  */
-static void fat83_to_str(const u8 *fat_name, char *dst)
+static void fat83_to_str(const u8 *fat_name, u8 ntres, char *dst)
 {
+    int lc_base = (ntres & 0x08) != 0;
+    int lc_ext  = (ntres & 0x10) != 0;
     int i, j = 0;
 
-    for (i = 0; i < 8 && fat_name[i] != ' '; i++)
-        dst[j++] = (char)fat_name[i];
+    for (i = 0; i < 8 && fat_name[i] != ' '; i++) {
+        u8 c = fat_name[i];
+        if (lc_base && c >= 'A' && c <= 'Z') c = (u8)(c + 32);
+        dst[j++] = (char)c;
+    }
 
     if (fat_name[8] != ' ') {
         dst[j++] = '.';
-        for (i = 8; i < 11 && fat_name[i] != ' '; i++)
-            dst[j++] = (char)fat_name[i];
+        for (i = 8; i < 11 && fat_name[i] != ' '; i++) {
+            u8 c = fat_name[i];
+            if (lc_ext && c >= 'A' && c <= 'Z') c = (u8)(c + 32);
+            dst[j++] = (char)c;
+        }
     }
     dst[j] = '\0';
 }
@@ -272,7 +285,7 @@ int fat16_listdir(void (*cb)(const char *name, unsigned int size))
             if (attr & (FAT_ATTR_DIR | FAT_ATTR_VOLUME)) continue;
 
             char name_str[13];
-            fat83_to_str(ent, name_str);
+            fat83_to_str(ent, ent[12], name_str);
             cb(name_str, (unsigned int)rd32(ent + 28));
         }
     }
