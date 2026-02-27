@@ -567,10 +567,8 @@ static int sys_write(unsigned int fd, const char *buf, unsigned int len)
 {
     unsigned int i;
     if (fd == FD_STDOUT) {
-        for (i = 0; i < len; i++) {
+        for (i = 0; i < len; i++)
             vga_putchar(buf[i], COLOR_DEFAULT);
-            serial_putchar(buf[i]);
-        }
         return (int)len;
     }
     if (fd >= FD_FILE0 && fd < (unsigned int)(FD_FILE0 + MAX_FILE_FDS)) {
