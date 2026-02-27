@@ -219,8 +219,6 @@ void kernel_main(void)
     vga_print("Hello, World!\n\n", COLOR_HELLO);
     serial_print("[kernel] Hello, World!\n");
 
-    vga_print("IBM PC x86 bare-metal kernel\n", COLOR_DEFAULT);
-    vga_print("Type on the keyboard -- characters appear below:\n\n", COLOR_DEFAULT);
     serial_print("[kernel] entering keyboard loop\n");
     vga_print("> ", COLOR_PROMPT);
 
