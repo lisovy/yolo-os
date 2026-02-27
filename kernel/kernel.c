@@ -751,6 +751,7 @@ void isr_handler(struct registers *r)
 
 extern void idt_init(void);
 extern int  fat16_init(void);
+extern int  fat16_listdir(void (*cb)(const char *name, unsigned int size));
 
 /* ============================================================
  * Kernel entry point
@@ -782,6 +783,26 @@ static const char *str_strip_prefix(const char *s, const char *prefix)
         if (*s++ != *prefix++) return 0;
     }
     return s;
+}
+
+static void ls_cb(const char *name, unsigned int size)
+{
+    char sizebuf[12];
+    uint_to_str(size, sizebuf);
+    vga_print(name, COLOR_DEFAULT);
+    vga_print("  ", COLOR_DEFAULT);
+    vga_print(sizebuf, COLOR_DEFAULT);
+    vga_putchar('\n', COLOR_DEFAULT);
+    serial_print(name);
+    serial_print("  ");
+    serial_print(sizebuf);
+    serial_putchar('\n');
+}
+
+static void cmd_ls(void)
+{
+    if (fat16_listdir(ls_cb) < 0)
+        vga_print("ls: disk error\n", COLOR_DEFAULT);
 }
 
 static void program_exec(const char *filename)
@@ -884,6 +905,8 @@ void kernel_main(void)
             const char *fname = str_strip_prefix(cmd, "run ");
             if (fname && *fname) {
                 program_exec(fname);
+            } else if (cmd[0] == 'l' && cmd[1] == 's' && cmd[2] == '\0') {
+                cmd_ls();
             } else if (cmd[0]) {
                 vga_print("unknown command\n", COLOR_DEFAULT);
             }
