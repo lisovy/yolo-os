@@ -59,6 +59,18 @@ static inline void outb(unsigned short port, unsigned char val)
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
 
+static inline unsigned short inw(unsigned short port)
+{
+    unsigned short val;
+    __asm__ volatile ("inw %1, %0" : "=a"(val) : "Nd"(port));
+    return val;
+}
+
+static inline void outw(unsigned short port, unsigned short val)
+{
+    __asm__ volatile ("outw %0, %1" : : "a"(val), "Nd"(port));
+}
+
 /* ============================================================
  * COM1 serial driver (16550 UART)
  * ============================================================ */
@@ -302,6 +314,110 @@ static void rtc_get_time(struct rtc_time *t)
 }
 
 /* ============================================================
+ * ATA PIO driver — primary channel, master drive
+ * ============================================================ */
+
+/* Primary ATA channel I/O ports */
+#define ATA_DATA      0x1F0   /* 16-bit data                      */
+#define ATA_SECT_CNT  0x1F2   /* sector count                     */
+#define ATA_LBA_LO    0x1F3   /* LBA bits  7:0                    */
+#define ATA_LBA_MID   0x1F4   /* LBA bits 15:8                    */
+#define ATA_LBA_HI    0x1F5   /* LBA bits 23:16                   */
+#define ATA_DRIVE     0x1F6   /* drive select + LBA bits 27:24    */
+#define ATA_CMD       0x1F7   /* command (write) / status (read)  */
+#define ATA_ALT_ST    0x3F6   /* alternate status (read-only here)*/
+
+#define ATA_SR_BSY  0x80
+#define ATA_SR_DRQ  0x08
+#define ATA_SR_ERR  0x01
+
+#define ATA_CMD_READ  0x20
+#define ATA_CMD_WRITE 0x30
+#define ATA_CMD_FLUSH 0xE7
+
+/* 400 ns delay: 4 reads of alternate status (~100 ns each) */
+static void ata_delay(void)
+{
+    inb(ATA_ALT_ST); inb(ATA_ALT_ST);
+    inb(ATA_ALT_ST); inb(ATA_ALT_ST);
+}
+
+/* Wait until BSY clears; returns 0 OK, -1 error/timeout */
+static int ata_wait_bsy(void)
+{
+    for (int i = 0; i < 0x100000; i++) {
+        unsigned char s = inb(ATA_CMD);
+        if (s & ATA_SR_ERR)    return -1;
+        if (!(s & ATA_SR_BSY)) return 0;
+    }
+    return -1;
+}
+
+/* Wait until BSY clears and DRQ sets; returns 0 OK, -1 error/timeout */
+static int ata_wait_drq(void)
+{
+    for (int i = 0; i < 0x100000; i++) {
+        unsigned char s = inb(ATA_CMD);
+        if (s & ATA_SR_ERR)                         return -1;
+        if (!(s & ATA_SR_BSY) && (s & ATA_SR_DRQ))  return 0;
+    }
+    return -1;
+}
+
+/*
+ * Read one 512-byte sector at LBA address into buf[256].
+ * Returns 0 on success, -1 on error.
+ */
+static int ata_read_sector(unsigned int lba, unsigned short *buf)
+{
+    if (ata_wait_bsy() < 0) return -1;
+
+    outb(ATA_DRIVE,    (unsigned char)(0xE0 | ((lba >> 24) & 0x0F)));
+    outb(ATA_SECT_CNT, 1);
+    outb(ATA_LBA_LO,   (unsigned char)(lba         & 0xFF));
+    outb(ATA_LBA_MID,  (unsigned char)((lba >>  8) & 0xFF));
+    outb(ATA_LBA_HI,   (unsigned char)((lba >> 16) & 0xFF));
+    outb(ATA_CMD,      ATA_CMD_READ);
+
+    ata_delay();
+    if (ata_wait_drq() < 0) return -1;
+
+    for (int i = 0; i < 256; i++)
+        buf[i] = inw(ATA_DATA);
+
+    return 0;
+}
+
+/*
+ * Write one 512-byte sector from buf[256] to LBA address.
+ * Returns 0 on success, -1 on error.
+ */
+static int ata_write_sector(unsigned int lba, const unsigned short *buf)
+{
+    if (ata_wait_bsy() < 0) return -1;
+
+    outb(ATA_DRIVE,    (unsigned char)(0xE0 | ((lba >> 24) & 0x0F)));
+    outb(ATA_SECT_CNT, 1);
+    outb(ATA_LBA_LO,   (unsigned char)(lba         & 0xFF));
+    outb(ATA_LBA_MID,  (unsigned char)((lba >>  8) & 0xFF));
+    outb(ATA_LBA_HI,   (unsigned char)((lba >> 16) & 0xFF));
+    outb(ATA_CMD,      ATA_CMD_WRITE);
+
+    ata_delay();
+    if (ata_wait_drq() < 0) return -1;
+
+    for (int i = 0; i < 256; i++)
+        outw(ATA_DATA, buf[i]);
+
+    /* Flush drive write cache */
+    outb(ATA_CMD, ATA_CMD_FLUSH);
+    ata_delay();
+    ata_wait_bsy();
+
+    return 0;
+}
+
+/* ============================================================
  * Status bar (row 24)
  * ============================================================ */
 
@@ -369,6 +485,43 @@ static void status_bar_update(void)
  * Kernel entry point
  * ============================================================ */
 
+/* Convert unsigned int to decimal string (null-terminated) */
+static void uint_to_str(unsigned int n, char *out)
+{
+    if (n == 0) { out[0] = '0'; out[1] = '\0'; return; }
+    char tmp[12];
+    int i = 0;
+    while (n) { tmp[i++] = (char)('0' + n % 10); n /= 10; }
+    int j = 0;
+    while (i > 0) out[j++] = tmp[--i];
+    out[j] = '\0';
+}
+
+/* ============================================================
+ * Kernel entry point
+ * ============================================================ */
+
+/*
+ * Disk sector 0 layout (persistent boot counter):
+ *   bytes 0-3 : magic 0x4F534479 ('OSDy' little-endian)
+ *   bytes 4-7 : boot count (uint32, little-endian)
+ */
+#define DISK_MAGIC 0x4F534479u
+
+static unsigned int read_u32(const unsigned char *p)
+{
+    return (unsigned int)p[0]        | ((unsigned int)p[1] << 8) |
+           ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+}
+
+static void write_u32(unsigned char *p, unsigned int v)
+{
+    p[0] = (unsigned char)(v);
+    p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16);
+    p[3] = (unsigned char)(v >> 24);
+}
+
 void kernel_main(void)
 {
     serial_init();
@@ -379,6 +532,30 @@ void kernel_main(void)
 
     vga_print("Hello, World!\n\n", COLOR_HELLO);
     serial_print("[kernel] Hello, World!\n");
+
+    /* ---- IDE disk: persistent boot counter ---- */
+    static unsigned short sector[256];          /* 512 B, aligned for inw/outw */
+    unsigned char *buf = (unsigned char *)sector;
+
+    if (ata_read_sector(0, sector) == 0) {
+        unsigned int magic = read_u32(buf);
+        unsigned int count = (magic == DISK_MAGIC) ? read_u32(buf + 4) : 0;
+
+        count++;
+        write_u32(buf,     DISK_MAGIC);
+        write_u32(buf + 4, count);
+        ata_write_sector(0, sector);
+
+        char cnt_str[12];
+        uint_to_str(count, cnt_str);
+        vga_print("Boot #", COLOR_DEFAULT);
+        vga_print(cnt_str, COLOR_HELLO);
+        vga_print("\n\n", COLOR_DEFAULT);
+        serial_print("[disk] boot #"); serial_print(cnt_str); serial_putchar('\n');
+    } else {
+        vga_print("Disk: error\n\n", COLOR_DEFAULT);
+        serial_print("[disk] error\n");
+    }
 
     serial_print("[kernel] entering keyboard loop\n");
     vga_print("> ", COLOR_PROMPT);
