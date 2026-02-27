@@ -23,6 +23,11 @@
 #define O_RDONLY 0
 #define O_WRONLY 1
 
+/* Syscall numbers — screen control */
+#define SYS_GETCHAR  5
+#define SYS_SETPOS   6
+#define SYS_CLRSCR   7
+
 /* Program argument string — written by kernel before exec_run() */
 #define ARGS_BASE 0x3FF800
 static inline const char *get_args(void) { return (const char *)ARGS_BASE; }
@@ -78,5 +83,12 @@ static inline int print(const char *s)
 {
     return write(STDOUT, s, strlen(s));
 }
+
+/* Blocking raw keyread — no echo, no line buffering */
+static inline int get_char(void) { return syscall(SYS_GETCHAR, 0, 0, 0); }
+/* Move VGA cursor to (row, col) */
+static inline void set_pos(int row, int col) { syscall(SYS_SETPOS, row, col, 0); }
+/* Clear text area (rows 0-23) and home cursor */
+static inline void clrscr(void) { syscall(SYS_CLRSCR, 0, 0, 0); }
 
 #endif /* OS_H */

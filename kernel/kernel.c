@@ -203,7 +203,7 @@ static void vga_print(const char *s, unsigned char color)
 #define SC_RSHIFT  0x36
 
 static const char scancode_map[] = {
-    /* 0x00 */ 0,    0,    '1',  '2',  '3',  '4',  '5',  '6',
+    /* 0x00 */ 0,    '\x1b','1',  '2',  '3',  '4',  '5',  '6',
     /* 0x08 */ '7',  '8',  '9',  '0',  '-',  '=',  '\b', '\t',
     /* 0x10 */ 'q',  'w',  'e',  'r',  't',  'y',  'u',  'i',
     /* 0x18 */ 'o',  'p',  '[',  ']',  '\n', 0,    'a',  's',
@@ -533,11 +533,14 @@ struct registers {
  *   2+ FAT16 file (up to MAX_FILE_FDS open at once)
  * ============================================================ */
 
-#define SYS_EXIT   0
-#define SYS_WRITE  1
-#define SYS_READ   2
-#define SYS_OPEN   3
-#define SYS_CLOSE  4
+#define SYS_EXIT    0
+#define SYS_WRITE   1
+#define SYS_READ    2
+#define SYS_OPEN    3
+#define SYS_CLOSE   4
+#define SYS_GETCHAR 5   /* blocking raw keyread, no echo    */
+#define SYS_SETPOS  6   /* set VGA cursor: EBX=row, ECX=col */
+#define SYS_CLRSCR  7   /* clear text area, cursor to 0,0   */
 
 #define FD_STDIN   0
 #define FD_STDOUT  1
@@ -685,6 +688,29 @@ static void syscall_dispatch(struct registers *r)
         break;
     case SYS_CLOSE:
         r->eax = (unsigned int)sys_close(r->ebx);
+        break;
+    case SYS_GETCHAR: {
+        char c = 0;
+        while (!c) c = kbd_getchar();
+        r->eax = (unsigned int)(unsigned char)c;
+        break;
+    }
+    case SYS_SETPOS: {
+        int row = (int)r->ebx;
+        int col = (int)r->ecx;
+        if (row < 0) row = 0;
+        if (row >= TEXT_ROWS) row = TEXT_ROWS - 1;
+        if (col < 0) col = 0;
+        if (col >= VGA_COLS) col = VGA_COLS - 1;
+        cursor_row = row;
+        cursor_col = col;
+        vga_update_hw_cursor();
+        r->eax = 0;
+        break;
+    }
+    case SYS_CLRSCR:
+        vga_clear();
+        r->eax = 0;
         break;
     default:
         r->eax = (unsigned int)-1;
