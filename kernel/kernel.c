@@ -165,6 +165,10 @@ static void vga_print(const char *s, unsigned char color)
  * PS/2 keyboard driver — scan code set 1, US QWERTY
  * ============================================================ */
 
+/* Scan codes for Shift keys */
+#define SC_LSHIFT  0x2A
+#define SC_RSHIFT  0x36
+
 /*
  * Index = scan code (make), value = ASCII character.
  * Value 0 means no ASCII representation (Shift, Ctrl, F-keys, ...).
@@ -180,26 +184,48 @@ static const char scancode_map[] = {
     /* 0x38 */ 0,    ' ',
 };
 
+static const char scancode_map_shift[] = {
+    /* 0x00 */ 0,    0,    '!',  '@',  '#',  '$',  '%',  '^',
+    /* 0x08 */ '&',  '*',  '(',  ')',  '_',  '+',  '\b', '\t',
+    /* 0x10 */ 'Q',  'W',  'E',  'R',  'T',  'Y',  'U',  'I',
+    /* 0x18 */ 'O',  'P',  '{',  '}',  '\n', 0,    'A',  'S',
+    /* 0x20 */ 'D',  'F',  'G',  'H',  'J',  'K',  'L',  ':',
+    /* 0x28 */ '"',  '~',  0,    '|',  'Z',  'X',  'C',  'V',
+    /* 0x30 */ 'B',  'N',  'M',  '<',  '>',  '?',  0,    '*',
+    /* 0x38 */ 0,    ' ',
+};
+
 #define SCANCODE_MAP_SIZE  ((int)(sizeof(scancode_map) / sizeof(scancode_map[0])))
+
+static int shift_pressed = 0;
 
 /*
  * Wait for a keypress and return its ASCII character.
- * Returns 0 for keys with no ASCII representation.
+ * Tracks Shift state; returns 0 for non-ASCII keys.
  */
 static char kbd_getchar(void)
 {
-    /* Wait until the keyboard output buffer is full */
     while (!(inb(KBD_STATUS) & 0x01))
         ;
 
     unsigned char sc = inb(KBD_DATA);
 
-    /* Bit 7 set = key-release event; ignore it */
-    if (sc & 0x80)
+    /* Key-release event (bit 7 set) */
+    if (sc & 0x80) {
+        unsigned char make = sc & 0x7F;
+        if (make == SC_LSHIFT || make == SC_RSHIFT)
+            shift_pressed = 0;
         return 0;
+    }
+
+    /* Track Shift press */
+    if (sc == SC_LSHIFT || sc == SC_RSHIFT) {
+        shift_pressed = 1;
+        return 0;
+    }
 
     if (sc < SCANCODE_MAP_SIZE)
-        return scancode_map[sc];
+        return shift_pressed ? scancode_map_shift[sc] : scancode_map[sc];
 
     return 0;
 }
