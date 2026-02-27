@@ -1,4 +1,2 @@
-*.bin
-*.elf
-*.o
-*.img
+build/
+disk.img

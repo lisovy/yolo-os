@@ -20,40 +20,47 @@ CFLAGS  := -m32 -ffreestanding -fno-pie -fno-stack-protector \
 
 LDFLAGS := -m elf_i386 -T kernel/linker.ld
 
+# All generated files go here; source directories stay clean.
+BUILD := build
+
 # Output files
 DISK_IMG  := disk.img
-BOOT_IDE  := boot/boot_ide.bin
-KERNEL    := kernel/kernel.bin
-KELF      := kernel/kernel.elf
+BOOT_IDE  := $(BUILD)/boot_ide.bin
+KERNEL    := $(BUILD)/kernel.bin
+KELF      := $(BUILD)/kernel.elf
 
 # Kernel object files
-KOBJS := kernel/entry.o kernel/isr.o kernel/idt.o kernel/kernel.o kernel/fat16.o
+KOBJS := $(BUILD)/entry.o $(BUILD)/isr.o $(BUILD)/idt.o \
+         $(BUILD)/kernel.o $(BUILD)/fat16.o
 
 # ======================================================================
 .PHONY: all run clean newdisk
 
 all: $(DISK_IMG)
 
+$(BUILD):
+	mkdir -p $@
+
 # --- Bootloader -------------------------------------------------------
 
-$(BOOT_IDE): boot/boot_ide.asm
+$(BOOT_IDE): boot/boot_ide.asm | $(BUILD)
 	$(NASM) -f bin -DKERNEL_SECTORS=$(KERNEL_SECTORS) $< -o $@
 
 # --- Kernel -----------------------------------------------------------
 
-kernel/entry.o: kernel/entry.asm
+$(BUILD)/entry.o: kernel/entry.asm | $(BUILD)
 	$(NASM) -f elf32 $< -o $@
 
-kernel/isr.o: kernel/isr.asm
+$(BUILD)/isr.o: kernel/isr.asm | $(BUILD)
 	$(NASM) -f elf32 $< -o $@
 
-kernel/idt.o: kernel/idt.c
+$(BUILD)/idt.o: kernel/idt.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-kernel/kernel.o: kernel/kernel.c
+$(BUILD)/kernel.o: kernel/kernel.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-kernel/fat16.o: kernel/fat16.c
+$(BUILD)/fat16.o: kernel/fat16.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(KELF): $(KOBJS) kernel/linker.ld
@@ -106,4 +113,4 @@ run: $(DISK_IMG)
 # disk.img is intentionally NOT removed by clean (holds persistent data).
 
 clean:
-	rm -f $(BOOT_IDE) $(KOBJS) $(KELF) $(KERNEL)
+	rm -rf $(BUILD)
