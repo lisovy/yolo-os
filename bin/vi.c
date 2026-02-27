@@ -15,6 +15,9 @@
  *
  * Scroll guard: row 23 is written with at most 79 chars so the VGA
  * cursor never wraps to row 24 and triggers vga_scroll().
+ *
+ * main() is placed first so it lands at 0x400000, the address the
+ * kernel jumps to.  All other functions are forward-declared here.
  */
 
 #include "os.h"
@@ -49,6 +52,129 @@ static char  msg[64];          /* one-shot status message, cleared on next key *
 
 static char  filename[64];
 static int   modified;
+
+/* Forward declarations — keeps main() first in .text */
+static int   slen(const char *s);
+static void  scopy(char *d, const char *s, int max);
+static int   seq(const char *a, const char *b);
+static int   fmt_num(char *dst, int n, int w);
+static void  rebuild(void);
+static int   llen(int li);
+static void  binsert(int pos, char c);
+static void  bdelete(int pos);
+static void  redraw(void);
+static void  clamp_cx(void);
+static void  scroll_to_cursor(void);
+static void  load(void);
+static void  save(void);
+
+/* ------------------------------------------------------------------ */
+/* main — must be first function so it lands at 0x400000              */
+
+void main(void)
+{
+    const char *arg = get_args();
+    if (!arg || !arg[0]) { print("usage: run vi <file>\n"); exit(1); }
+    scopy(filename, arg, sizeof(filename));
+
+    load();
+    cy = 0; cx = 0; top = 0;
+    mode = MODE_NORMAL;
+    msg[0] = '\0';
+    redraw();
+
+    for (;;) {
+        int c = get_char();
+        msg[0] = '\0';
+
+        /* ---- NORMAL ---- */
+        if (mode == MODE_NORMAL) {
+            switch ((char)c) {
+            case 'i': mode = MODE_INSERT; break;
+            case 'o': {
+                /* open new line below current */
+                binsert(lines[cy] + llen(cy), '\n');
+                cy++; cx = 0;
+                mode = MODE_INSERT;
+                break;
+            }
+            case 'h': if (cx > 0) cx--; break;
+            case 'l': { int m = llen(cy); if (cx < m) cx++; break; }
+            case 'j': if (cy < nlines - 1) { cy++; clamp_cx(); } break;
+            case 'k': if (cy > 0)          { cy--; clamp_cx(); } break;
+            case 'x': {
+                /* delete char under cursor (not the newline) */
+                int pos = lines[cy] + cx;
+                if (pos < buf_len && buf[pos] != '\n') {
+                    bdelete(pos);
+                    clamp_cx();
+                }
+                break;
+            }
+            case ':':
+                mode = MODE_COMMAND;
+                cmd_len = 0; cmd[0] = '\0';
+                break;
+            }
+
+        /* ---- INSERT ---- */
+        } else if (mode == MODE_INSERT) {
+            if (c == ESC) {
+                mode = MODE_NORMAL;
+                if (cx > 0) cx--;   /* vi moves cursor back one on ESC */
+                clamp_cx();
+            } else if (c == '\b') {
+                int pos = lines[cy] + cx;
+                if (pos > 0) {
+                    int prev_len = (cx == 0 && cy > 0) ? llen(cy - 1) : -1;
+                    bdelete(pos - 1);
+                    if (cx > 0) {
+                        cx--;
+                    } else if (cy > 0) {
+                        cy--;
+                        cx = prev_len;
+                    }
+                }
+            } else if (c == '\r' || c == '\n') {
+                binsert(lines[cy] + cx, '\n');
+                cy++; cx = 0;
+            } else if (c >= 0x20 && c < 0x7F) {
+                binsert(lines[cy] + cx, (char)c);
+                cx++;
+            }
+
+        /* ---- COMMAND ---- */
+        } else {
+            if (c == ESC) {
+                mode = MODE_NORMAL;
+            } else if (c == '\r' || c == '\n') {
+                if (seq(cmd, "w")) {
+                    save();
+                } else if (seq(cmd, "q")) {
+                    if (modified)
+                        scopy(msg, "unsaved changes -- use :q! to force", sizeof(msg));
+                    else
+                        { clrscr(); exit(0); }
+                } else if (seq(cmd, "q!")) {
+                    clrscr(); exit(0);
+                } else if (seq(cmd, "wq") || seq(cmd, "x")) {
+                    save(); clrscr(); exit(0);
+                } else {
+                    scopy(msg, "unknown command", sizeof(msg));
+                }
+                mode = MODE_NORMAL;
+            } else if (c == '\b') {
+                if (cmd_len > 0) cmd[--cmd_len] = '\0';
+            } else if (c >= 0x20 && c < 0x7F && cmd_len < 30) {
+                cmd[cmd_len++] = (char)c;
+                cmd[cmd_len]   = '\0';
+            }
+        }
+
+        scroll_to_cursor();
+        redraw();
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /* Utilities                                                           */
@@ -228,111 +354,4 @@ static void save(void)
     close(fd);
     modified = 0;
     scopy(msg, "saved", sizeof(msg));
-}
-
-/* ------------------------------------------------------------------ */
-
-void main(void)
-{
-    const char *arg = get_args();
-    if (!arg || !arg[0]) { print("usage: run vi <file>\n"); exit(1); }
-    scopy(filename, arg, sizeof(filename));
-
-    load();
-    cy = 0; cx = 0; top = 0;
-    mode = MODE_NORMAL;
-    msg[0] = '\0';
-    redraw();
-
-    for (;;) {
-        int c = get_char();
-        msg[0] = '\0';
-
-        /* ---- NORMAL ---- */
-        if (mode == MODE_NORMAL) {
-            switch ((char)c) {
-            case 'i': mode = MODE_INSERT; break;
-            case 'o': {
-                /* open new line below current */
-                binsert(lines[cy] + llen(cy), '\n');
-                cy++; cx = 0;
-                mode = MODE_INSERT;
-                break;
-            }
-            case 'h': if (cx > 0) cx--; break;
-            case 'l': { int m = llen(cy); if (cx < m) cx++; break; }
-            case 'j': if (cy < nlines - 1) { cy++; clamp_cx(); } break;
-            case 'k': if (cy > 0)          { cy--; clamp_cx(); } break;
-            case 'x': {
-                /* delete char under cursor (not the newline) */
-                int pos = lines[cy] + cx;
-                if (pos < buf_len && buf[pos] != '\n') {
-                    bdelete(pos);
-                    clamp_cx();
-                }
-                break;
-            }
-            case ':':
-                mode = MODE_COMMAND;
-                cmd_len = 0; cmd[0] = '\0';
-                break;
-            }
-
-        /* ---- INSERT ---- */
-        } else if (mode == MODE_INSERT) {
-            if (c == ESC) {
-                mode = MODE_NORMAL;
-                if (cx > 0) cx--;   /* vi moves cursor back one on ESC */
-                clamp_cx();
-            } else if (c == '\b') {
-                int pos = lines[cy] + cx;
-                if (pos > 0) {
-                    int prev_len = (cx == 0 && cy > 0) ? llen(cy - 1) : -1;
-                    bdelete(pos - 1);
-                    if (cx > 0) {
-                        cx--;
-                    } else if (cy > 0) {
-                        cy--;
-                        cx = prev_len;
-                    }
-                }
-            } else if (c == '\r' || c == '\n') {
-                binsert(lines[cy] + cx, '\n');
-                cy++; cx = 0;
-            } else if (c >= 0x20 && c < 0x7F) {
-                binsert(lines[cy] + cx, (char)c);
-                cx++;
-            }
-
-        /* ---- COMMAND ---- */
-        } else {
-            if (c == ESC) {
-                mode = MODE_NORMAL;
-            } else if (c == '\r' || c == '\n') {
-                if (seq(cmd, "w")) {
-                    save();
-                } else if (seq(cmd, "q")) {
-                    if (modified)
-                        scopy(msg, "unsaved changes -- use :q! to force", sizeof(msg));
-                    else
-                        { clrscr(); exit(0); }
-                } else if (seq(cmd, "q!")) {
-                    clrscr(); exit(0);
-                } else if (seq(cmd, "wq") || seq(cmd, "x")) {
-                    save(); clrscr(); exit(0);
-                } else {
-                    scopy(msg, "unknown command", sizeof(msg));
-                }
-                mode = MODE_NORMAL;
-            } else if (c == '\b') {
-                if (cmd_len > 0) cmd[--cmd_len] = '\0';
-            } else if (c >= 0x20 && c < 0x7F && cmd_len < 30) {
-                cmd[cmd_len++] = (char)c;
-                cmd[cmd_len]   = '\0';
-            }
-        }
-
-        scroll_to_cursor();
-        redraw();
-    }
 }
