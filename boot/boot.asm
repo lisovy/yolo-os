@@ -11,8 +11,16 @@
 [ORG 0x7C00]
 
 KERNEL_SEGMENT  equ 0x1000   ; ES for INT 13h: 0x1000:0x0000 = phys 0x10000
-KERNEL_SECTORS  equ 16       ; Sectors to read (max 17 fit on track 0 after MBR)
 KERNEL_ADDR     equ 0x10000  ; Physical address of kernel in protected mode
+
+; Floppy geometry: 18 sectors/track, 2 heads, 80 cylinders.
+; Sector numbering is 1-based; sector 1 of track 0 head 0 is the MBR.
+; We split the load across two track reads to stay within track boundaries:
+;   Read 1: CHS(0,0,2) — 17 sectors (sectors 2-18 of head 0)
+;   Read 2: CHS(0,1,1) — 18 sectors (all of head 1, track 0)
+; Total capacity: 35 sectors = 17920 bytes.
+KERNEL_SECS_H0  equ 17   ; sectors from track 0, head 0 (starting at sector 2)
+KERNEL_SECS_H1  equ 18   ; sectors from track 0, head 1 (starting at sector 1)
 
 start:
     cli                     ; Disable interrupts for the entire boot sequence.
@@ -23,19 +31,32 @@ start:
     mov sp, 0x7C00          ; Stack below bootloader
 
     ; ------------------------------------------------------------------
-    ; Load kernel from disk via BIOS INT 13h CHS read (AH=0x02)
-    ; Floppy geometry is well-defined; CHS(0,0,2) is the second sector.
+    ; Load kernel from floppy via BIOS INT 13h CHS (AH=0x02).
+    ; Read 1: track 0, head 0, sectors 2-18 → phys 0x10000
+    ; Read 2: track 0, head 1, sectors 1-18 → phys 0x12200
+    ; (BIOS reads must not cross track boundaries.)
     ; ------------------------------------------------------------------
     mov ax, KERNEL_SEGMENT
     mov es, ax
     xor bx, bx              ; ES:BX = 0x1000:0x0000 = phys 0x10000
 
-    mov ah, 0x02            ; BIOS: read sectors
-    mov al, KERNEL_SECTORS  ; number of sectors
+    mov ah, 0x02
+    mov al, KERNEL_SECS_H0  ; 17 sectors
     mov ch, 0               ; cylinder 0
-    mov cl, 2               ; sector 2 (1-based; sector 1 is the MBR)
+    mov cl, 2               ; starting at sector 2
     mov dh, 0               ; head 0
     mov dl, 0               ; drive 0 = floppy A
+    int 0x13
+    jc disk_error
+
+    ; Read 2: head 1 → 0x1000:(17*512) = 0x1000:0x2200 = phys 0x12200
+    mov bx, KERNEL_SECS_H0 * 512
+    mov ah, 0x02
+    mov al, KERNEL_SECS_H1  ; 18 sectors
+    mov ch, 0               ; cylinder 0
+    mov cl, 1               ; starting at sector 1
+    mov dh, 1               ; head 1
+    mov dl, 0
     int 0x13
     jc disk_error
 
