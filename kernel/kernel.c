@@ -31,6 +31,9 @@
 /* COM1 serial port */
 #define COM1        0x3F8
 
+/* Error color for panic screen */
+#define COLOR_ERR  0x4F   /* white on red */
+
 /* RTC I/O ports and registers */
 #define RTC_INDEX   0x70
 #define RTC_DATA    0x71
@@ -498,6 +501,77 @@ static void uint_to_str(unsigned int n, char *out)
 }
 
 /* ============================================================
+ * ISR handler — called from isr_common in isr.asm
+ * ============================================================ */
+
+/* Must match the stack layout built by isr_common (see isr.asm) */
+struct registers {
+    unsigned int gs, fs, es, ds;
+    unsigned int edi, esi, ebp, esp, ebx, edx, ecx, eax; /* pusha */
+    unsigned int int_no, err_code;
+    unsigned int eip, cs, eflags;  /* pushed by CPU */
+};
+
+static const char *exception_name(unsigned int n)
+{
+    static const char *names[] = {
+        "Division by zero",        /* 0  */
+        "Debug",                   /* 1  */
+        "NMI",                     /* 2  */
+        "Breakpoint",              /* 3  */
+        "Overflow",                /* 4  */
+        "Bound range exceeded",    /* 5  */
+        "Invalid opcode",          /* 6  */
+        "Device not available",    /* 7  */
+        "Double fault",            /* 8  */
+        "Coprocessor overrun",     /* 9  */
+        "Invalid TSS",             /* 10 */
+        "Segment not present",     /* 11 */
+        "Stack fault",             /* 12 */
+        "General protection fault",/* 13 */
+        "Page fault",              /* 14 */
+        "Reserved",                /* 15 */
+        "x87 FPU error",           /* 16 */
+        "Alignment check",         /* 17 */
+        "Machine check",           /* 18 */
+        "SIMD FP exception",       /* 19 */
+    };
+    if (n < 20) return names[n];
+    return "Reserved";
+}
+
+/* Called from isr_common; r points to the saved register frame on the stack */
+void isr_handler(struct registers *r)
+{
+    if (r->int_no < 32) {
+        /* CPU exception — print panic screen and halt */
+        vga_print("\n\n *** KERNEL PANIC: ", COLOR_ERR);
+        vga_print(exception_name(r->int_no), COLOR_ERR);
+        vga_print(" *** \n", COLOR_ERR);
+        serial_print("[PANIC] exception ");
+        char tmp[4];
+        uint_to_str(r->int_no, tmp);
+        serial_print(tmp);
+        serial_print(": ");
+        serial_print(exception_name(r->int_no));
+        serial_putchar('\n');
+        for (;;) __asm__ volatile ("hlt");
+
+    } else if (r->int_no < 48) {
+        /* Hardware IRQ — send EOI and return */
+        if (r->int_no >= 40)
+            outb(0xA0, 0x20);   /* slave EOI */
+        outb(0x20, 0x20);       /* master EOI */
+
+    } else if (r->int_no == 0x80) {
+        /* int 0x80 syscall — to be implemented */
+        (void)r;
+    }
+}
+
+extern void idt_init(void);
+
+/* ============================================================
  * Kernel entry point
  * ============================================================ */
 
@@ -526,6 +600,10 @@ void kernel_main(void)
 {
     serial_init();
     serial_print("[kernel] started\n");
+
+    idt_init();
+    __asm__ volatile ("sti");
+    serial_print("[kernel] IDT ready\n");
 
     vga_clear();
     serial_print("[kernel] VGA cleared\n");

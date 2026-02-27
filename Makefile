@@ -23,7 +23,7 @@ KERNEL   := kernel/kernel.bin
 KELF     := kernel/kernel.elf
 
 # Kernel object files
-KOBJS   := kernel/entry.o kernel/kernel.o
+KOBJS   := kernel/entry.o kernel/isr.o kernel/idt.o kernel/kernel.o
 
 # ======================================================================
 .PHONY: all run clean
@@ -39,6 +39,12 @@ $(BOOT): boot/boot.asm
 
 kernel/entry.o: kernel/entry.asm
 	$(NASM) -f elf32 $< -o $@
+
+kernel/isr.o: kernel/isr.asm
+	$(NASM) -f elf32 $< -o $@
+
+kernel/idt.o: kernel/idt.c
+	$(CC) $(CFLAGS) -c $< -o $@
 
 kernel/kernel.o: kernel/kernel.c
 	$(CC) $(CFLAGS) -c $< -o $@
