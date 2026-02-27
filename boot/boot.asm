@@ -22,18 +22,12 @@ start:
     mov [boot_drive], dl    ; BIOS stores boot drive number in DL
 
     ; ------------------------------------------------------------------
-    ; Load kernel from disk via BIOS INT 13h
+    ; Load kernel from disk via BIOS INT 13h extended read (LBA mode)
+    ; AH=0x42 is geometry-independent and works reliably in QEMU.
     ; ------------------------------------------------------------------
-    mov ax, KERNEL_SEGMENT
-    mov es, ax
-    xor bx, bx              ; ES:BX = 0x1000:0x0000 = phys 0x10000
-
-    mov ah, 0x02            ; BIOS: read sectors
-    mov al, KERNEL_SECTORS
-    mov ch, 0               ; Cylinder 0
-    mov cl, 2               ; Start at sector 2 (sector 1 is the MBR)
-    mov dh, 0               ; Head 0
+    mov ah, 0x42
     mov dl, [boot_drive]
+    mov si, dap
     int 0x13
     jc disk_error
 
@@ -113,6 +107,15 @@ gdt_end:
 gdt_descriptor:
     dw gdt_end - gdt_null - 1   ; GDT size minus 1
     dd gdt_null                  ; Physical address of GDT
+
+; Disk Address Packet for INT 13h extended read (AH=0x42)
+dap:
+    db 0x10             ; packet size (16 bytes)
+    db 0                ; reserved
+    dw KERNEL_SECTORS   ; number of sectors to read
+    dw 0x0000           ; destination buffer offset
+    dw KERNEL_SEGMENT   ; destination buffer segment (0x1000:0x0000 = phys 0x10000)
+    dq 1                ; starting LBA (1 = first sector after MBR)
 
 ; Data
 boot_drive:      db 0
