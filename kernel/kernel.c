@@ -500,10 +500,6 @@ static void uint_to_str(unsigned int n, char *out)
     out[j] = '\0';
 }
 
-/* ============================================================
- * ISR handler — called from isr_common in isr.asm
- * ============================================================ */
-
 /* Must match the stack layout built by isr_common (see isr.asm) */
 struct registers {
     unsigned int gs, fs, es, ds;
@@ -511,6 +507,177 @@ struct registers {
     unsigned int int_no, err_code;
     unsigned int eip, cs, eflags;  /* pushed by CPU */
 };
+
+/* ============================================================
+ * Syscall interface — int 0x80
+ *
+ * Register convention:
+ *   EAX = syscall number
+ *   EBX = arg1,  ECX = arg2,  EDX = arg3
+ *   Return value written back to EAX in the saved register frame.
+ *
+ * Syscall numbers:
+ *   0  exit(code)
+ *   1  write(fd, buf, len)  -> bytes written;  fd 1 = stdout
+ *   2  read(fd, buf, len)   -> bytes read;     fd 0 = stdin (line-buffered)
+ *   3  open(path, flags)    -> fd or -1;       flags: 0=read, 1=write
+ *   4  close(fd)            -> 0 or -1
+ *
+ * File descriptors:
+ *   0  stdin  (PS/2 keyboard, line-buffered)
+ *   1  stdout (VGA + serial)
+ *   2+ FAT16 file (up to MAX_FILE_FDS open at once)
+ * ============================================================ */
+
+#define SYS_EXIT   0
+#define SYS_WRITE  1
+#define SYS_READ   2
+#define SYS_OPEN   3
+#define SYS_CLOSE  4
+
+#define FD_STDIN   0
+#define FD_STDOUT  1
+#define FD_FILE0   2
+
+#define O_RDONLY   0
+#define O_WRONLY   1
+
+#define MAX_FILE_FDS  4
+#define FILE_BUF_SIZE 16384   /* 16 KB per file descriptor */
+
+struct fd_entry {
+    int           used;
+    int           mode;
+    unsigned int  size;
+    unsigned int  pos;
+    char          name[13];
+    unsigned char buf[FILE_BUF_SIZE];
+};
+
+static struct fd_entry g_fds[MAX_FILE_FDS];
+
+extern int fat16_read(const char *filename, unsigned char *buf, unsigned int max_bytes);
+extern int fat16_write(const char *filename, const unsigned char *data, unsigned int size);
+
+static int sys_write(unsigned int fd, const char *buf, unsigned int len)
+{
+    unsigned int i;
+    if (fd == FD_STDOUT) {
+        for (i = 0; i < len; i++) {
+            vga_putchar(buf[i], COLOR_DEFAULT);
+            serial_putchar(buf[i]);
+        }
+        return (int)len;
+    }
+    if (fd >= FD_FILE0 && fd < (unsigned int)(FD_FILE0 + MAX_FILE_FDS)) {
+        struct fd_entry *f = &g_fds[fd - FD_FILE0];
+        if (!f->used || f->mode != O_WRONLY) return -1;
+        for (i = 0; i < len; i++) {
+            if (f->pos >= FILE_BUF_SIZE) return (int)i;
+            f->buf[f->pos++] = (unsigned char)buf[i];
+        }
+        if (f->pos > f->size) f->size = f->pos;
+        return (int)len;
+    }
+    return -1;
+}
+
+static int sys_read(unsigned int fd, char *buf, unsigned int len)
+{
+    if (fd == FD_STDIN) {
+        unsigned int i = 0;
+        while (i < len) {
+            char c = 0;
+            while (!c) c = kbd_getchar();
+            buf[i++] = c;
+            vga_putchar(c, COLOR_DEFAULT);
+            serial_putchar(c);
+            if (c == '\n') break;
+        }
+        return (int)i;
+    }
+    if (fd >= FD_FILE0 && fd < (unsigned int)(FD_FILE0 + MAX_FILE_FDS)) {
+        struct fd_entry *f = &g_fds[fd - FD_FILE0];
+        if (!f->used || f->mode != O_RDONLY) return -1;
+        unsigned int i;
+        for (i = 0; i < len && f->pos < f->size; i++)
+            buf[i] = (char)f->buf[f->pos++];
+        return (int)i;
+    }
+    return -1;
+}
+
+static int sys_open(const char *path, int flags)
+{
+    int i;
+    for (i = 0; i < MAX_FILE_FDS; i++) {
+        if (!g_fds[i].used) break;
+    }
+    if (i == MAX_FILE_FDS) return -1;
+
+    struct fd_entry *f = &g_fds[i];
+
+    int j;
+    for (j = 0; j < 12 && path[j]; j++) f->name[j] = path[j];
+    f->name[j] = '\0';
+
+    f->mode = flags;
+    f->pos  = 0;
+
+    if (flags == O_RDONLY) {
+        int n = fat16_read(path, f->buf, FILE_BUF_SIZE);
+        if (n < 0) return -1;
+        f->size = (unsigned int)n;
+    } else {
+        f->size = 0;
+    }
+
+    f->used = 1;
+    return i + FD_FILE0;
+}
+
+static int sys_close(unsigned int fd)
+{
+    if (fd < FD_FILE0 || fd >= (unsigned int)(FD_FILE0 + MAX_FILE_FDS)) return -1;
+    struct fd_entry *f = &g_fds[fd - FD_FILE0];
+    if (!f->used) return -1;
+
+    if (f->mode == O_WRONLY)
+        fat16_write(f->name, f->buf, f->size);
+
+    f->used = 0;
+    return 0;
+}
+
+static void syscall_dispatch(struct registers *r)
+{
+    switch (r->eax) {
+    case SYS_EXIT:
+        serial_print("[kernel] program exited\n");
+        /* halt until program loader is implemented */
+        for (;;) __asm__ volatile ("hlt");
+        break;
+    case SYS_WRITE:
+        r->eax = (unsigned int)sys_write(r->ebx, (const char *)r->ecx, r->edx);
+        break;
+    case SYS_READ:
+        r->eax = (unsigned int)sys_read(r->ebx, (char *)r->ecx, r->edx);
+        break;
+    case SYS_OPEN:
+        r->eax = (unsigned int)sys_open((const char *)r->ebx, (int)r->ecx);
+        break;
+    case SYS_CLOSE:
+        r->eax = (unsigned int)sys_close(r->ebx);
+        break;
+    default:
+        r->eax = (unsigned int)-1;
+        break;
+    }
+}
+
+/* ============================================================
+ * ISR handler — called from isr_common in isr.asm
+ * ============================================================ */
 
 static const char *exception_name(unsigned int n)
 {
@@ -564,15 +731,12 @@ void isr_handler(struct registers *r)
         outb(0x20, 0x20);       /* master EOI */
 
     } else if (r->int_no == 0x80) {
-        /* int 0x80 syscall — to be implemented */
-        (void)r;
+        syscall_dispatch(r);
     }
 }
 
 extern void idt_init(void);
 extern int  fat16_init(void);
-extern int  fat16_read(const char *filename, unsigned char *buf, unsigned int max_bytes);
-extern int  fat16_write(const char *filename, const unsigned char *data, unsigned int size);
 
 /* ============================================================
  * Kernel entry point
