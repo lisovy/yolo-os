@@ -50,16 +50,18 @@ $(KERNEL): $(KELF)
 	$(OBJCPY) -O binary $< $@
 
 # --- Disk image -------------------------------------------------------
-# Sector 0 (512 B) : bootloader
-# Sectors 1+       : kernel (loaded to 0x10000)
+# 1.44 MB floppy image:
+#   Sector 0 (512 B) : bootloader
+#   Sectors 1+       : kernel (loaded to 0x10000)
 
 $(OS_IMG): $(BOOT) $(KERNEL)
 	cat $(BOOT) $(KERNEL) > $@
+	truncate -s 1474560 $@   # pad to standard 1.44 MB floppy size
 
 # --- Run in QEMU ------------------------------------------------------
 
 run: $(OS_IMG)
-	$(QEMU) -drive format=raw,file=$(OS_IMG)
+	$(QEMU) -fda $(OS_IMG)
 
 # --- Cleanup ----------------------------------------------------------
 

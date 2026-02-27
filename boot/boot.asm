@@ -1,13 +1,17 @@
 ; boot.asm - MBR bootloader
 ;
-; Loads the kernel from disk sectors 2+ to physical address 0x10000,
+; Loads the kernel from floppy sectors 2+ to physical address 0x10000,
 ; enables the A20 line, sets up a GDT and switches to 32-bit protected mode.
+;
+; Boot media: 1.44 MB floppy image (-fda in QEMU).
+; Floppy geometry: 80 cylinders, 2 heads, 18 sectors/track.
+; Kernel sits at CHS(0, 0, 2) — the sector immediately after the MBR.
 
 [BITS 16]
 [ORG 0x7C00]
 
-KERNEL_SEGMENT  equ 0x1000   ; Segment for INT 13h: 0x1000:0x0000 = phys 0x10000
-KERNEL_SECTORS  equ 32       ; Number of kernel sectors to load (max 16 KB)
+KERNEL_SEGMENT  equ 0x1000   ; ES for INT 13h: 0x1000:0x0000 = phys 0x10000
+KERNEL_SECTORS  equ 16       ; Sectors to read (max 17 fit on track 0 after MBR)
 KERNEL_ADDR     equ 0x10000  ; Physical address of kernel in protected mode
 
 start:
@@ -19,15 +23,20 @@ start:
     mov sp, 0x7C00          ; Stack below bootloader
     sti
 
-    mov [boot_drive], dl    ; BIOS stores boot drive number in DL
+    ; ------------------------------------------------------------------
+    ; Load kernel from disk via BIOS INT 13h CHS read (AH=0x02)
+    ; Floppy geometry is well-defined; CHS(0,0,2) is the second sector.
+    ; ------------------------------------------------------------------
+    mov ax, KERNEL_SEGMENT
+    mov es, ax
+    xor bx, bx              ; ES:BX = 0x1000:0x0000 = phys 0x10000
 
-    ; ------------------------------------------------------------------
-    ; Load kernel from disk via BIOS INT 13h extended read (LBA mode)
-    ; AH=0x42 is geometry-independent and works reliably in QEMU.
-    ; ------------------------------------------------------------------
-    mov ah, 0x42
-    mov dl, [boot_drive]
-    mov si, dap
+    mov ah, 0x02            ; BIOS: read sectors
+    mov al, KERNEL_SECTORS  ; number of sectors
+    mov ch, 0               ; cylinder 0
+    mov cl, 2               ; sector 2 (1-based; sector 1 is the MBR)
+    mov dh, 0               ; head 0
+    mov dl, 0               ; drive 0 = floppy A
     int 0x13
     jc disk_error
 
@@ -108,17 +117,7 @@ gdt_descriptor:
     dw gdt_end - gdt_null - 1   ; GDT size minus 1
     dd gdt_null                  ; Physical address of GDT
 
-; Disk Address Packet for INT 13h extended read (AH=0x42)
-dap:
-    db 0x10             ; packet size (16 bytes)
-    db 0                ; reserved
-    dw KERNEL_SECTORS   ; number of sectors to read
-    dw 0x0000           ; destination buffer offset
-    dw KERNEL_SEGMENT   ; destination buffer segment (0x1000:0x0000 = phys 0x10000)
-    dq 1                ; starting LBA (1 = first sector after MBR)
-
 ; Data
-boot_drive:      db 0
 msg_disk_error:  db "Disk read error!", 0
 
 ; Boot signature
