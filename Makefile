@@ -1,7 +1,7 @@
 # Makefile for a simple x86 bare-metal OS
 #
 # Required tools (Debian/Ubuntu):
-#   sudo apt install nasm gcc gcc-multilib binutils qemu-system-x86
+#   sudo apt install nasm gcc gcc-multilib binutils qemu-system-x86 dosfstools
 
 NASM   := nasm
 CC     := gcc
@@ -23,10 +23,10 @@ KERNEL   := kernel/kernel.bin
 KELF     := kernel/kernel.elf
 
 # Kernel object files
-KOBJS   := kernel/entry.o kernel/isr.o kernel/idt.o kernel/kernel.o
+KOBJS   := kernel/entry.o kernel/isr.o kernel/idt.o kernel/kernel.o kernel/fat16.o
 
 # ======================================================================
-.PHONY: all run clean
+.PHONY: all run clean newdisk
 
 all: $(OS_IMG)
 
@@ -49,6 +49,9 @@ kernel/idt.o: kernel/idt.c
 kernel/kernel.o: kernel/kernel.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+kernel/fat16.o: kernel/fat16.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
 # Link to ELF first, then convert to a flat binary
 $(KELF): $(KOBJS) kernel/linker.ld
 	$(LD) $(LDFLAGS) $(KOBJS) -o $@
@@ -66,10 +69,15 @@ $(OS_IMG): $(BOOT) $(KERNEL)
 
 # --- IDE disk image ---------------------------------------------------
 # Created once; NOT removed by 'clean' because it holds persistent data.
-# Delete manually if you want a fresh disk: rm -f $(DISK_IMG)
+# To reformat: make newdisk  (or: rm -f $(DISK_IMG) && make $(DISK_IMG))
 
 $(DISK_IMG):
 	dd if=/dev/zero of=$@ bs=1M count=4 2>/dev/null
+	mkfs.fat -F 16 -s 1 -n "YOLOOS" $@
+
+newdisk:
+	rm -f $(DISK_IMG)
+	$(MAKE) $(DISK_IMG)
 
 # --- Run in QEMU ------------------------------------------------------
 

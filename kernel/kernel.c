@@ -371,7 +371,7 @@ static int ata_wait_drq(void)
  * Read one 512-byte sector at LBA address into buf[256].
  * Returns 0 on success, -1 on error.
  */
-static int ata_read_sector(unsigned int lba, unsigned short *buf)
+int ata_read_sector(unsigned int lba, unsigned short *buf)
 {
     if (ata_wait_bsy() < 0) return -1;
 
@@ -395,7 +395,7 @@ static int ata_read_sector(unsigned int lba, unsigned short *buf)
  * Write one 512-byte sector from buf[256] to LBA address.
  * Returns 0 on success, -1 on error.
  */
-static int ata_write_sector(unsigned int lba, const unsigned short *buf)
+int ata_write_sector(unsigned int lba, const unsigned short *buf)
 {
     if (ata_wait_bsy() < 0) return -1;
 
@@ -570,30 +570,21 @@ void isr_handler(struct registers *r)
 }
 
 extern void idt_init(void);
+extern int  fat16_init(void);
+extern int  fat16_read(const char *filename, unsigned char *buf, unsigned int max_bytes);
+extern int  fat16_write(const char *filename, const unsigned char *data, unsigned int size);
 
 /* ============================================================
  * Kernel entry point
  * ============================================================ */
 
-/*
- * Disk sector 0 layout (persistent boot counter):
- *   bytes 0-3 : magic 0x4F534479 ('OSDy' little-endian)
- *   bytes 4-7 : boot count (uint32, little-endian)
- */
-#define DISK_MAGIC 0x4F534479u
-
-static unsigned int read_u32(const unsigned char *p)
+/* Parse leading decimal digits from a byte buffer; stop at non-digit. */
+static unsigned int parse_uint(const unsigned char *s, int len)
 {
-    return (unsigned int)p[0]        | ((unsigned int)p[1] << 8) |
-           ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
-}
-
-static void write_u32(unsigned char *p, unsigned int v)
-{
-    p[0] = (unsigned char)(v);
-    p[1] = (unsigned char)(v >> 8);
-    p[2] = (unsigned char)(v >> 16);
-    p[3] = (unsigned char)(v >> 24);
+    unsigned int n = 0;
+    for (int i = 0; i < len && s[i] >= '0' && s[i] <= '9'; i++)
+        n = n * 10 + (unsigned int)(s[i] - '0');
+    return n;
 }
 
 void kernel_main(void)
@@ -611,21 +602,24 @@ void kernel_main(void)
     vga_print("Welcome to the YOLO-OS\n\n", COLOR_HELLO);
     serial_print("[kernel] Welcome to the YOLO-OS\n");
 
-    /* ---- IDE disk: persistent boot counter ---- */
-    static unsigned short sector[256];          /* 512 B, aligned for inw/outw */
-    unsigned char *buf = (unsigned char *)sector;
+    /* ---- FAT16: persistent boot counter in BOOT.TXT ---- */
+    static unsigned char fat_buf[32];  /* file content buffer */
 
-    if (ata_read_sector(0, sector) == 0) {
-        unsigned int magic = read_u32(buf);
-        unsigned int count = (magic == DISK_MAGIC) ? read_u32(buf + 4) : 0;
+    if (fat16_init() == 0) {
+        int n = fat16_read("BOOT.TXT", fat_buf, sizeof(fat_buf) - 1);
+        unsigned int count = (n > 0) ? parse_uint(fat_buf, n) : 0;
 
         count++;
-        write_u32(buf,     DISK_MAGIC);
-        write_u32(buf + 4, count);
-        ata_write_sector(0, sector);
 
+        /* Render new count into fat_buf as "NNN\n" */
         char cnt_str[12];
         uint_to_str(count, cnt_str);
+        int slen = 0;
+        while (cnt_str[slen]) { fat_buf[slen] = (unsigned char)cnt_str[slen]; slen++; }
+        fat_buf[slen++] = '\n';
+
+        fat16_write("BOOT.TXT", fat_buf, (unsigned int)slen);
+
         vga_print("Boot #", COLOR_DEFAULT);
         vga_print(cnt_str, COLOR_HELLO);
         vga_print("\n\n", COLOR_DEFAULT);
