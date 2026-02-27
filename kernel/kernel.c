@@ -608,8 +608,8 @@ void kernel_main(void)
     vga_clear();
     serial_print("[kernel] VGA cleared\n");
 
-    vga_print("Hello, World!\n\n", COLOR_HELLO);
-    serial_print("[kernel] Hello, World!\n");
+    vga_print("Welcome to the YOLO-OS\n\n", COLOR_HELLO);
+    serial_print("[kernel] Welcome to the YOLO-OS\n");
 
     /* ---- IDE disk: persistent boot counter ---- */
     static unsigned short sector[256];          /* 512 B, aligned for inw/outw */
