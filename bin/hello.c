@@ -10,7 +10,7 @@ static inline void sys_exit(void);
 
 void main(void)
 {
-    print("Hello from ring 0!\n");
+    print("Hello, world!\n");
     sys_exit();
 }
 

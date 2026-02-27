@@ -16,7 +16,7 @@ KERNEL_SECTORS := 128
 
 # 32-bit freestanding build
 CFLAGS  := -m32 -ffreestanding -fno-pie -fno-stack-protector \
-           -nostdlib -nostdinc -O2 -Wall -Wextra
+           -nostdlib -nostdinc -O2 -Wall -Wextra -DDEBUG
 
 LDFLAGS := -m elf_i386 -T kernel/linker.ld
 

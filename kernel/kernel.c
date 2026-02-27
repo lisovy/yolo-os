@@ -157,6 +157,10 @@ static void vga_putchar(char c, unsigned char color)
 {
     volatile unsigned short *vga = (volatile unsigned short *)VGA_MEMORY;
 
+#ifdef DEBUG
+    serial_putchar(c);
+#endif
+
     if (c == '\n') {
         cursor_col = 0;
         cursor_row++;
@@ -650,12 +654,13 @@ static int sys_close(unsigned int fd)
 }
 
 extern unsigned int exec_ret_esp;  /* defined in entry.asm; used by SYS_EXIT */
+static unsigned int g_exit_code;   /* set by SYS_EXIT, printed by program_exec */
 
 static void syscall_dispatch(struct registers *r)
 {
     switch (r->eax) {
     case SYS_EXIT:
-        serial_print("[exec] program exited\n");
+        g_exit_code = r->ebx;
         /* Restore the kernel stack saved by exec_run() and return to
          * program_exec() as if exec_run() returned normally.
          * exec_ret_esp points at: edi, esi, ebx, ebp, retaddr (low→high). */
@@ -793,10 +798,6 @@ static void ls_cb(const char *name, unsigned int size)
     vga_print("  ", COLOR_DEFAULT);
     vga_print(sizebuf, COLOR_DEFAULT);
     vga_putchar('\n', COLOR_DEFAULT);
-    serial_print(name);
-    serial_print("  ");
-    serial_print(sizebuf);
-    serial_putchar('\n');
 }
 
 static void cmd_ls(void)
@@ -824,8 +825,12 @@ static void program_exec(const char *filename)
     exec_run();
 
     /* Arrives here either via normal `ret` from the program or via SYS_EXIT. */
+    char exitbuf[12];
+    uint_to_str(g_exit_code, exitbuf);
+    vga_print("\nexited ", COLOR_DEFAULT);
+    vga_print(exitbuf, COLOR_DEFAULT);
     vga_putchar('\n', COLOR_DEFAULT);
-    serial_print("[exec] done\n");
+    serial_print("[exec] exited "); serial_print(exitbuf); serial_putchar('\n');
 }
 
 /* ============================================================
@@ -890,13 +895,11 @@ void kernel_main(void)
             if (cmd_len > 0) {
                 cmd_len--;
                 vga_putchar('\b', COLOR_DEFAULT);
-                serial_putchar('\b');
             }
             continue;
         }
 
         vga_putchar(c, COLOR_DEFAULT);
-        serial_putchar(c);
 
         if (c == '\n') {
             cmd[cmd_len] = '\0';
@@ -912,7 +915,6 @@ void kernel_main(void)
             }
 
             vga_print("> ", COLOR_PROMPT);
-            serial_print("> ");
         } else if (cmd_len < (int)sizeof(cmd) - 1) {
             cmd[cmd_len++] = c;
         }
