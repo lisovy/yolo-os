@@ -1,7 +1,7 @@
 # Makefile for YOLO-OS (bare-metal x86)
 #
 # Required tools (Debian/Ubuntu):
-#   sudo apt install nasm gcc gcc-multilib binutils qemu-system-x86 dosfstools
+#   sudo apt install nasm gcc gcc-multilib binutils qemu-system-x86 dosfstools mtools
 
 NASM   := nasm
 CC     := gcc
@@ -33,6 +33,10 @@ KELF      := $(BUILD)/kernel.elf
 KOBJS := $(BUILD)/entry.o $(BUILD)/isr.o $(BUILD)/idt.o \
          $(BUILD)/kernel.o $(BUILD)/fat16.o
 
+# User programs (flat binaries installed to FAT16; loaded by kernel at 0x400000)
+# To add a new program: add its .bin to USER_BINS and write a build rule below.
+USER_BINS := $(BUILD)/hello.bin
+
 # ======================================================================
 .PHONY: all run clean newdisk
 
@@ -40,6 +44,17 @@ all: $(DISK_IMG)
 
 $(BUILD):
 	mkdir -p $@
+
+# --- User programs ----------------------------------------------------
+
+$(BUILD)/hello.o: bin/hello.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/hello.elf: $(BUILD)/hello.o bin/user.ld
+	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
+
+$(BUILD)/hello.bin: $(BUILD)/hello.elf
+	$(OBJCPY) -O binary $< $@
 
 # --- Bootloader -------------------------------------------------------
 
@@ -80,7 +95,7 @@ $(KERNEL): $(KELF)
 # KERNEL_SECTORS is the single variable controlling all three of the above.
 # To reformat from scratch (required when KERNEL_SECTORS changes): make newdisk
 
-$(DISK_IMG): $(KERNEL) $(BOOT_IDE)
+$(DISK_IMG): $(KERNEL) $(BOOT_IDE) $(USER_BINS)
 	@size=$$(wc -c < $(KERNEL)); \
 	 max=$$(($(KERNEL_SECTORS) * 512)); \
 	 if [ "$$size" -gt "$$max" ]; then \
@@ -95,7 +110,12 @@ $(DISK_IMG): $(KERNEL) $(BOOT_IDE)
 	fi
 	bash scripts/patch_boot.sh $@ $(BOOT_IDE)
 	dd if=$(KERNEL) of=$@ bs=512 seek=1 conv=notrunc 2>/dev/null
-	@echo "[disk] $(DISK_IMG) updated (boot + kernel)"
+	@for f in $(USER_BINS); do \
+	    name=$$(basename "$$f" | tr '[:lower:]' '[:upper:]'); \
+	    mcopy -o -i $@ "$$f" "::$$name"; \
+	    echo "[disk] installed $$name"; \
+	done
+	@echo "[disk] $(DISK_IMG) updated (boot + kernel + user programs)"
 
 newdisk:
 	rm -f $(DISK_IMG)
