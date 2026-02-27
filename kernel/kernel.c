@@ -810,10 +810,17 @@ static void cmd_ls(void)
 
 static void program_exec(const char *filename, const char *args)
 {
-    int n = fat16_read(filename, (unsigned char *)PROG_BASE, PROG_MAX_SIZE);
+    /* Append .bin so the user types "run xxd" and we look for "xxd.bin". */
+    char fname[18];
+    int fi = 0;
+    while (filename[fi] && fi < 8) { fname[fi] = filename[fi]; fi++; }
+    fname[fi++] = '.'; fname[fi++] = 'b'; fname[fi++] = 'i'; fname[fi++] = 'n';
+    fname[fi] = '\0';
+
+    int n = fat16_read(fname, (unsigned char *)PROG_BASE, PROG_MAX_SIZE);
     if (n <= 0) {
         vga_print("exec: not found: ", COLOR_DEFAULT);
-        vga_print(filename, COLOR_DEFAULT);
+        vga_print(fname, COLOR_DEFAULT);
         vga_putchar('\n', COLOR_DEFAULT);
         serial_print("[exec] not found: ");
         serial_print(filename);
@@ -821,7 +828,7 @@ static void program_exec(const char *filename, const char *args)
         return;
     }
     serial_print("[exec] running: ");
-    serial_print(filename);
+    serial_print(fname);
     serial_putchar('\n');
 
     /* Copy args string to fixed address so the program can read it */
