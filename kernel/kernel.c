@@ -777,6 +777,8 @@ static unsigned int parse_uint(const unsigned char *s, int len)
 
 #define PROG_BASE     0x400000
 #define PROG_MAX_SIZE (256 * 1024)  /* 256 KB */
+#define ARGS_BASE     0x3FF800      /* args string written here before exec_run() */
+#define ARGS_MAX      200
 
 extern void         exec_run(void);
 extern unsigned int exec_ret_esp;
@@ -806,7 +808,7 @@ static void cmd_ls(void)
         vga_print("ls: disk error\n", COLOR_DEFAULT);
 }
 
-static void program_exec(const char *filename)
+static void program_exec(const char *filename, const char *args)
 {
     int n = fat16_read(filename, (unsigned char *)PROG_BASE, PROG_MAX_SIZE);
     if (n <= 0) {
@@ -821,6 +823,12 @@ static void program_exec(const char *filename)
     serial_print("[exec] running: ");
     serial_print(filename);
     serial_putchar('\n');
+
+    /* Copy args string to fixed address so the program can read it */
+    char *dst = (char *)ARGS_BASE;
+    unsigned int ai = 0;
+    while (args[ai] && ai < ARGS_MAX - 1) { dst[ai] = args[ai]; ai++; }
+    dst[ai] = '\0';
 
     exec_run();
 
@@ -905,9 +913,15 @@ void kernel_main(void)
             cmd[cmd_len] = '\0';
             cmd_len = 0;
 
-            const char *fname = str_strip_prefix(cmd, "run ");
-            if (fname && *fname) {
-                program_exec(fname);
+            const char *rest = str_strip_prefix(cmd, "run ");
+            if (rest && *rest) {
+                /* split "PROG [ARGS...]" into name and args */
+                char prog[14];
+                int pi = 0;
+                while (rest[pi] && rest[pi] != ' ' && pi < 13) { prog[pi] = rest[pi]; pi++; }
+                prog[pi] = '\0';
+                const char *args = (rest[pi] == ' ') ? &rest[pi + 1] : "";
+                program_exec(prog, args);
             } else if (cmd[0] == 'l' && cmd[1] == 's' && cmd[2] == '\0') {
                 cmd_ls();
             } else if (cmd[0]) {

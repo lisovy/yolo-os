@@ -23,6 +23,10 @@
 #define O_RDONLY 0
 #define O_WRONLY 1
 
+/* Program argument string — written by kernel before exec_run() */
+#define ARGS_BASE 0x3FF800
+static inline const char *get_args(void) { return (const char *)ARGS_BASE; }
+
 /* Raw syscall — up to 3 arguments */
 static inline int syscall(int num, int a, int b, int c)
 {
