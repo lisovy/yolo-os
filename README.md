@@ -22,13 +22,13 @@ make test
 ## Architecture
 
 - **CPU**: 32-bit protected mode; kernel in ring 0, user programs in ring 3
-- **Paging**: enabled, identity-mapped; U/S bits enforce kernel/user separation; segfaults caught
+- **Paging**: per-process page tables; U/S bits enforce kernel/user separation; segfaults caught
 - **Boot**: 16-bit MBR bootloader → ATA PIO LBA read → jumps to 32-bit kernel at `0x10000`
 - **Video**: VGA text mode 80×25 (`0xB8000`); user programs may switch to Mode 13h graphics
 - **Keyboard**: PS/2 polling, scan code set 1, US QWERTY, arrow keys supported
 - **Filesystem**: FAT16 on the same IDE disk image, read/write via ATA PIO
 - **Syscalls**: `int 0x80` (EAX=number, EBX/ECX/EDX=args, return in EAX)
-- **Programs**: flat 32-bit binaries loaded from FAT16 into RAM at `0x400000`, run in ring 3
+- **Programs**: flat 32-bit binaries stored in `/bin` on FAT16, loaded into RAM at `0x400000`, run in ring 3
 
 ---
 
@@ -42,9 +42,10 @@ The single `disk.img` (4 MB raw) holds both the kernel and the filesystem:
 |--------|---------|
 | Sector 0 | Boot sector — MBR code + FAT16 BPB (patched by `scripts/patch_boot.sh`) |
 | Sectors 1 – 128 | Kernel binary (controlled by `KERNEL_SECTORS` in Makefile) |
-| Sector 129+ | FAT16 filesystem — FAT tables, root directory, data clusters |
+| Sector 129+ | FAT16 filesystem — FAT tables, root directory (`BOOT.TXT`, `bin/`), data clusters |
 
-User programs and persistent data (`BOOT.TXT`) live in the FAT16 partition.
+User programs live in the `/bin` directory on the FAT16 partition (stored without the `.bin` extension).
+`BOOT.TXT` in the root holds a persistent boot counter.
 
 ---
 
@@ -52,48 +53,62 @@ User programs and persistent data (`BOOT.TXT`) live in the FAT16 partition.
 
 ![memory layout](docs/memory-layout.png)
 
-| Address | Content | Ring |
-|---------|---------|------|
+Two physical memory slots are reserved for processes. Both the shell and any child program
+link at virtual `0x400000`; per-process page tables map that virtual address to different
+physical frames.
+
+| Physical address | Content | Ring |
+|-----------------|---------|------|
 | `0x00000` | IVT / BIOS data area | 0 only |
 | `0x07C00` | MBR bootloader (512 B) | 0 only |
-| `0x10000` | Kernel (~14 KB) | 0 only |
+| `0x10000` | Kernel (~16 KB) | 0 only |
 | `0x90000` | Kernel stack top (grows down) | 0 only |
 | `0xA0000` | VGA graphics framebuffer (Mode 13h, 320×200) | 0 + 3 |
 | `0xB8000` | VGA text framebuffer (80×25) | 0 + 3 |
-| `0x400000` | `PROG_BASE` — user program loaded here (max 256 KB) | 3 |
-| `0x7FC000` | `ARGS_BASE` — argument string passed to user programs | 3 |
-| `0x7FF000` | User stack top (grows down) | 3 |
+| `0x800000` | Shell binary (`/bin/sh`) — virtual `0x400000` in `page_dir_shell` | 3 |
+| `0xBFC000` | Shell args area (`ARGS_BASE`) | 3 |
+| `0xBFF000` | Shell stack top (grows down) | 3 |
+| `0xC00000` | Child binary — virtual `0x400000` in `page_dir_child` | 3 |
+| `0xFFC000` | Child args area | 3 |
+| `0xFFF000` | Child stack top (grows down) | 3 |
 
 ---
 
 ## Shell
 
-After boot you get a simple interactive shell:
+The kernel boots, loads `/bin/sh` into the shell slot (physical `0x800000`), and execs it.
+All user interaction happens inside the shell process.
 
 ```
-> ls                    # list files and dirs (dirs shown with trailing /)
-> run hello             # load hello.bin from root, run it
-> run xxd BOOT.TXT      # run xxd.bin with argument "BOOT.TXT"
-> run vi notes.txt      # open notes.txt in the text editor
-> run demo              # start the graphics demo
-> mkdir docs            # create a subdirectory
-> cd docs               # enter it (prompt changes to /docs> )
+> ls                    # list files and dirs in cwd (dirs shown with trailing /)
+> ls bin                # list contents of bin/
+> cd bin                # enter a subdirectory (prompt changes to /bin> )
 > cd ..                 # go up to parent
-> rm hello.bin          # delete file (prompts y/N)
+> hello                 # run /bin/hello
+> xxd BOOT.TXT          # run /bin/xxd with argument "BOOT.TXT"
+> vi notes.txt          # open notes.txt in the text editor
+> demo                  # start the graphics demo
+> mkdir docs            # create a subdirectory in cwd
+> rm file.txt           # delete file (prompts y/N)
 > mv foo.txt bar.txt    # rename within current directory
 ```
 
 - Left/right arrow keys move the cursor within the current line
 - Up/down arrows are ignored (no history)
-- Prompt shows cwd when not at root: `/docs> `
-- `run` always loads `.bin` from the root directory; file syscalls inside the program use cwd
+- Prompt shows cwd when not at root: `/bin> `
+- Programs are loaded from `/bin`; file syscalls inside the program use cwd
 
 ---
 
 ## User programs
 
 All programs are freestanding 32-bit flat binaries linked at `0x400000`, run in ring 3.
+They are stored in `/bin` on FAT16 without a file extension.
 Include `bin/os.h` to get syscall wrappers — no libc, no linking required.
+
+### sh
+
+The interactive shell (first user process launched by the kernel).
 
 ### hello
 
@@ -104,8 +119,8 @@ Prints "Hello, World!" and exits.
 Hex dump of a file (16 bytes per line, ASCII sidebar).
 
 ```
-> run xxd BOOT.TXT
-> run xxd hello.bin
+> xxd BOOT.TXT
+> xxd notes.txt
 ```
 
 ### vi
@@ -128,6 +143,23 @@ A vi-like text editor.
 
 VGA Mode 13h (320×200, 256 colours) snow animation.
 Press `q` to quit. The kernel automatically restores text mode on exit.
+
+### ls
+
+Lists files and directories in the current directory (or a given directory argument).
+Directories are shown with a trailing `/`; files show their size in bytes.
+
+### rm
+
+Deletes a file or empty directory. Prompts `[y/N]` before removing.
+
+### mkdir
+
+Creates a subdirectory in the current directory.
+
+### mv
+
+Renames a file or directory within the current directory. Usage: `mv <src> <dst>`
 
 ### segfault
 
@@ -153,7 +185,7 @@ Useful for verifying that ring-3 memory protection works.
    $(BUILD)/myprog.bin: $(BUILD)/myprog.elf
        $(OBJCPY) -O binary $< $@
    ```
-3. `make` and `run myprog`.
+3. `make` and then run `myprog` in the shell.
 
 Use `get_args()` to read the argument string passed after the program name.
 
@@ -168,7 +200,7 @@ Include `bin/os.h`. All functions are `static inline` wrappers around `int 0x80`
 ```c
 void exit(int code);
 ```
-Terminate the program. `code` is displayed by the shell as `exited N`.
+Terminate the program and return to the shell.
 
 ---
 
@@ -193,9 +225,9 @@ Read up to `len` bytes into `buf`. Returns number of bytes read, or `-1` on erro
 ```c
 int open(const char *path, int flags);
 ```
-Open a file in the current directory. Returns a file descriptor (`≥2`), or `-1` if not found / on error.
-- `flags=O_RDONLY` (0) — read: file is loaded into a kernel buffer; subsequent `read()` calls return data from it
-- `flags=O_WRONLY` (1) — write: creates the file if it does not exist, truncates it if it does
+Open a file in the current directory. Returns a file descriptor (`≥2`), or `-1` on error.
+- `flags=O_RDONLY` (0) — read: file is loaded into a kernel buffer
+- `flags=O_WRONLY` (1) — write: creates the file if it does not exist, truncates if it does
 
 ---
 
@@ -237,9 +269,60 @@ Move the VGA hardware cursor. `row`: 0–24, `col`: 0–79.
 ---
 
 ```c
+int getpos(void);
+```
+Return the current VGA cursor position as `row * 256 + col`.
+
+---
+
+```c
 void clrscr(void);
 ```
 Clear the entire text screen and move the cursor to (0, 0).
+
+---
+
+```c
+int readdir(struct direntry *buf, int max);
+```
+Fill `buf` with up to `max` entries from the current directory. Returns the count.
+Each `struct direntry` has `char name[13]`, `unsigned int size`, `int is_dir`.
+
+---
+
+```c
+int chdir(const char *name);
+```
+Change the current directory. Returns `0` on success, `-1` if not found.
+
+---
+
+```c
+int unlink(const char *name);
+```
+Delete a file or empty directory. Returns `0`, `-1` (not found), or `-2` (directory not empty).
+
+---
+
+```c
+int os_mkdir(const char *name);
+```
+Create a subdirectory in the current directory. Returns `0` or `-1`.
+
+---
+
+```c
+int os_rename(const char *src, const char *dst);
+```
+Rename a file or directory within the current directory. Returns `0` or `-1`.
+
+---
+
+```c
+int exec(const char *name, const char *args);
+```
+Load and run `/bin/<name>`, passing `args` as the argument string.
+Returns the child's exit code, or `-1` if the program was not found.
 
 ---
 
@@ -259,12 +342,12 @@ Direct x86 I/O port access. Available from ring 3 because the kernel sets `IOPL=
 |------|----------------|
 | boot | OS boots, welcome message, shell prompt |
 | unknown_command | unknown input prints "unknown command" |
-| hello | `run hello` output contains "Hello" |
-| ls | `ls` lists all expected `.bin` files |
-| xxd | `run xxd BOOT.TXT` prints a hex dump |
-| xxd_missing_file | `run xxd NOSUCHFILE.TXT` prints "cannot open" |
-| vi_quit | `run vi` + `:q!` returns to shell |
-| segfault | `run segfault` prints "Segmentation fault" and returns to shell |
+| hello | `hello` output contains "Hello" |
+| ls | `ls` shows `bin/` directory |
+| xxd | `xxd BOOT.TXT` prints a hex dump |
+| xxd_missing_file | `xxd NOSUCHFILE.TXT` prints "cannot open" |
+| vi_quit | `vi test.txt` + `:q!` returns to shell |
+| segfault | `segfault` prints "Segmentation fault" and returns to shell |
 | fs_operations | `mkdir`, create file via `vi`, `rm` file, `rm` dir |
 
 ---
