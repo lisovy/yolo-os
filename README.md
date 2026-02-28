@@ -160,19 +160,36 @@ Use `get_args()` to read the argument string passed after the program name.
 
 ## Syscall reference
 
+All syscalls use `int 0x80`: `EAX` = syscall number, `EBX`/`ECX`/`EDX` = args, return value in `EAX`.
+Include `bin/os.h` for the C wrappers below.
+
+| Function | Description |
+|----------|-------------|
+| `exit(code)` | Terminate the program. `code` is printed by the shell as "exited N". |
+| `write(fd, buf, len)` → bytes | Write `len` bytes from `buf` to `fd`. `fd=1` = stdout (VGA + serial). For open files (`fd≥2`) data is buffered until `close()`. Returns bytes written or -1. |
+| `read(fd, buf, len)` → bytes | Read up to `len` bytes into `buf`. `fd=0` = stdin (keyboard, line-buffered, echoed). For open files reads from current position. Returns bytes read or -1. |
+| `open(path, flags)` → fd | Open a FAT16 file in the cwd. `flags`: `O_RDONLY=0` reads file into memory; `O_WRONLY=1` creates/truncates for writing. Returns fd (≥2) or -1. |
+| `close(fd)` → 0/-1 | Close fd. For `O_WRONLY` files flushes the buffer to disk. |
+| `get_char()` → char | Blocking read of one raw keystroke (no echo). Arrow keys return `KEY_UP/DOWN/LEFT/RIGHT` (0x80–0x83). |
+| `get_char_nonblock()` → char/0 | Non-blocking version of `get_char`; returns 0 immediately if no key is ready. |
+| `set_pos(row, col)` | Move the VGA hardware cursor to `row` (0–24), `col` (0–79). |
+| `clrscr()` | Clear the entire text screen and move cursor to (0, 0). |
+| `outb(port, val)` | Write byte `val` to I/O port `port`. Available because IOPL=3 in ring 3. |
+| `inb(port)` → byte | Read one byte from I/O port `port`. |
+
+File descriptors: `0` = stdin, `1` = stdout, `2`–`5` = FAT16 files (max 4 open, 16 KB buffer each).
+
 ```c
-// from bin/os.h
-void  exit(int code);
-int   write(int fd, const char *buf, int len);
-int   read(int fd, char *buf, int len);
-int   open(const char *path, int flags);   // O_RDONLY=0, O_WRONLY=1
-int   close(int fd);
-int   get_char(void);                      // blocking
-int   get_char_nonblock(void);             // returns 0 if no key ready
-void  set_pos(int row, int col);
-void  clrscr(void);
-void  outb(unsigned short port, unsigned char val);  // direct I/O (IOPL=3)
-unsigned char inb(unsigned short port);
+// Quick usage example (from bin/os.h)
+int fd = open("data.txt", O_RDONLY);
+char buf[64];
+int n = read(fd, buf, sizeof(buf));
+close(fd);
+
+fd = open("out.txt", O_WRONLY);
+write(fd, buf, n);
+close(fd);   // flushes to disk
+exit(0);
 ```
 
 ---
