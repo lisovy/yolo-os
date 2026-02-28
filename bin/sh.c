@@ -16,7 +16,7 @@
 #define COLOR_PROMPT   0x0A   /* light green on black */
 
 #define CMD_MAX   79
-#define CWD_MAX   64
+#define CWD_MAX   128
 
 /* ── small helpers ────────────────────────────────────────────────────── */
 
@@ -80,10 +80,28 @@ static char cwd_path[CWD_MAX] = "";
 
 static void update_cwd(const char *name)
 {
+    /* cd / → root */
     if (name[0] == '/' && !name[1]) {
         cwd_path[0] = '\0';
         return;
     }
+    /* Absolute path (e.g. /bin or /bin/subdir): replace cwd entirely */
+    if (name[0] == '/') {
+        int nlen = sh_strlen(name);
+        if (nlen >= CWD_MAX) {
+            sh_print("cd: path too long\n");
+            return;
+        }
+        int len = 0;
+        int i = 0;
+        while (name[i] && len < CWD_MAX - 1)
+            cwd_path[len++] = name[i++];
+        /* strip trailing slashes */
+        while (len > 1 && cwd_path[len - 1] == '/') len--;
+        cwd_path[len] = '\0';
+        return;
+    }
+    /* cd .. → strip last component */
     if (name[0] == '.' && name[1] == '.' && !name[2]) {
         int len = sh_strlen(cwd_path);
         if (len > 0) {
@@ -93,15 +111,18 @@ static void update_cwd(const char *name)
         cwd_path[len] = '\0';
         return;
     }
-    /* Append /name */
+    /* Relative name: append /name */
     int len = sh_strlen(cwd_path);
-    if (len < CWD_MAX - 2) {
-        cwd_path[len++] = '/';
-        int i = 0;
-        while (name[i] && len < CWD_MAX - 1)
-            cwd_path[len++] = name[i++];
-        cwd_path[len] = '\0';
+    int nlen = sh_strlen(name);
+    if (len + 1 + nlen >= CWD_MAX) {
+        sh_print("cd: path too long\n");
+        return;
     }
+    cwd_path[len++] = '/';
+    int i = 0;
+    while (name[i] && len < CWD_MAX - 1)
+        cwd_path[len++] = name[i++];
+    cwd_path[len] = '\0';
 }
 
 /* ── shell main ─────────────────────────────────────────────────────── */

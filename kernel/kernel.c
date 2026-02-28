@@ -688,7 +688,7 @@ struct fd_entry {
     int           mode;
     unsigned int  size;
     unsigned int  pos;
-    char          name[64];
+    char          name[128];
     unsigned char buf[FILE_BUF_SIZE];
 };
 
@@ -754,8 +754,12 @@ static int sys_open(const char *path, int flags)
 
     struct fd_entry *f = &g_fds[i];
 
+    int plen = 0;
+    while (path[plen]) plen++;
+    if (plen > 127) return -1;
+
     int j;
-    for (j = 0; j < 63 && path[j]; j++) f->name[j] = path[j];
+    for (j = 0; j < 127 && path[j]; j++) f->name[j] = path[j];
     f->name[j] = '\0';
 
     f->mode = flags;
