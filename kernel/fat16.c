@@ -360,6 +360,10 @@ int fat16_listdir(void (*cb)(const char *name, unsigned int size, int is_dir))
     return 0;
 }
 
+/* Forward declarations for path helpers defined later in this file */
+static int path_has_sep(const char *p);
+static int fat16_resolve_path(const char *path, char *name_out);
+
 /* ============================================================
  * fat16_read — read a named file from the cwd into buf.
  * Returns number of bytes read, or -1 on error / file not found.
@@ -368,6 +372,15 @@ int fat16_listdir(void (*cb)(const char *name, unsigned int size, int is_dir))
 int fat16_read(const char *filename, unsigned char *buf, unsigned int max_bytes)
 {
     if (!g_initialized) return -1;
+
+    if (path_has_sep(filename)) {
+        u16 saved = g_cwd_cluster;
+        char name[13];
+        if (fat16_resolve_path(filename, name) < 0) { g_cwd_cluster = saved; return -1; }
+        int r = fat16_read(name, buf, max_bytes);
+        g_cwd_cluster = saved;
+        return r;
+    }
 
     u8 fat_name[11];
     str_to_fat83(filename, fat_name);
@@ -439,6 +452,15 @@ read_not_found:
 int fat16_write(const char *filename, const unsigned char *data, unsigned int size)
 {
     if (!g_initialized) return -1;
+
+    if (path_has_sep(filename)) {
+        u16 saved = g_cwd_cluster;
+        char name[13];
+        if (fat16_resolve_path(filename, name) < 0) { g_cwd_cluster = saved; return -1; }
+        int r = fat16_write(name, data, size);
+        g_cwd_cluster = saved;
+        return r;
+    }
 
     u8 fat_name[11];
     str_to_fat83(filename, fat_name);
@@ -551,6 +573,15 @@ int fat16_delete(const char *name)
 {
     if (!g_initialized) return -1;
 
+    if (path_has_sep(name)) {
+        u16 saved = g_cwd_cluster;
+        char resolved[13];
+        if (fat16_resolve_path(name, resolved) < 0) { g_cwd_cluster = saved; return -1; }
+        int r = fat16_delete(resolved);
+        g_cwd_cluster = saved;
+        return r;
+    }
+
     u8 fat_name[11];
     str_to_fat83(name, fat_name);
 
@@ -596,6 +627,15 @@ int fat16_delete(const char *name)
 int fat16_mkdir(const char *name)
 {
     if (!g_initialized) return -1;
+
+    if (path_has_sep(name)) {
+        u16 saved = g_cwd_cluster;
+        char resolved[13];
+        if (fat16_resolve_path(name, resolved) < 0) { g_cwd_cluster = saved; return -1; }
+        int r = fat16_mkdir(resolved);
+        g_cwd_cluster = saved;
+        return r;
+    }
 
     u8 fat_name[11];
     str_to_fat83(name, fat_name);
@@ -723,14 +763,24 @@ rename_scan_done:
 }
 
 /* ============================================================
- * fat16_chdir — change the current working directory.
- * name: directory name, ".." to go up, "/" to go to root.
- * Returns 0 on success, -1 if not found or not a directory.
+ * Path helpers
  * ============================================================ */
 
-int fat16_chdir(const char *name)
+/* Returns 1 if path contains a '/' character, 0 otherwise. */
+static int path_has_sep(const char *p)
 {
-    if (!g_initialized) return -1;
+    while (*p) if (*p++ == '/') return 1;
+    return 0;
+}
+
+/* ============================================================
+ * chdir_one — single-step directory change (internal).
+ * Handles: "/", "..", ".", or a plain directory name.
+ * Does NOT support multi-component paths.
+ * ============================================================ */
+
+static int chdir_one(const char *name)
+{
     if (!name || !name[0]) return 0;
 
     /* cd / → root */
@@ -742,7 +792,6 @@ int fat16_chdir(const char *name)
     /* cd .. → parent */
     if (name[0] == '.' && name[1] == '.' && !name[2]) {
         if (g_cwd_cluster == 0) return 0;  /* already at root */
-        /* Read the .. entry (second 32-byte entry in first sector) */
         u32 lba = dir_sector_lba(g_cwd_cluster, 0);
         if (!lba) return -1;
         if (ata_read_sector(lba, g_sec1) < 0) return -1;
@@ -754,7 +803,7 @@ int fat16_chdir(const char *name)
     /* cd . → no-op */
     if (name[0] == '.' && !name[1]) return 0;
 
-    /* Regular name: find directory entry */
+    /* Regular name: find directory entry in current cwd */
     u8 fat_name[11];
     str_to_fat83(name, fat_name);
 
@@ -767,7 +816,7 @@ int fat16_chdir(const char *name)
         for (int e = 0; e < 16; e++) {
             u8 *ent = p + e * 32;
 
-            if (ent[0] == 0x00) return -1;   /* not found */
+            if (ent[0] == 0x00) return -1;
             if (ent[0] == 0xE5) continue;
 
             u8 attr = ent[11];
@@ -781,6 +830,66 @@ int fat16_chdir(const char *name)
         }
     }
     return -1;
+}
+
+/* ============================================================
+ * fat16_resolve_path — navigate to the parent directory of a
+ * (possibly multi-component) path and copy the final component
+ * into name_out (caller must provide ≥ 13 bytes).
+ *
+ * Modifies g_cwd_cluster.  On error returns -1 without restoring
+ * g_cwd_cluster — the caller is responsible for save/restore.
+ * ============================================================ */
+
+static int fat16_resolve_path(const char *path, char *name_out)
+{
+    const char *p = path;
+
+    /* Absolute path: start from root */
+    if (*p == '/') { g_cwd_cluster = 0; p++; }
+    while (*p == '/') p++;   /* skip redundant slashes */
+
+    for (;;) {
+        /* Copy next component into name_out */
+        int i = 0;
+        while (p[i] && p[i] != '/' && i < 12) { name_out[i] = p[i]; i++; }
+        name_out[i] = '\0';
+        p += i;
+        while (*p == '/') p++;   /* skip trailing slashes */
+
+        if (!*p) {
+            /* name_out holds the final component */
+            return (name_out[0] != '\0') ? 0 : -1;
+        }
+
+        /* More components follow — enter this directory */
+        if (chdir_one(name_out) < 0) return -1;
+    }
+}
+
+/* ============================================================
+ * fat16_chdir — change the current working directory.
+ * Supports single names, "..", "/", and multi-component paths
+ * such as "/bin" or "bin/subdir".
+ * Returns 0 on success, -1 if not found or not a directory.
+ * ============================================================ */
+
+int fat16_chdir(const char *path)
+{
+    if (!g_initialized) return -1;
+    if (!path || !path[0]) return 0;
+
+    /* Single-step: no separator, or exactly "/" */
+    if (!path_has_sep(path) || (path[0] == '/' && !path[1]))
+        return chdir_one(path);
+
+    /* Multi-component: navigate to parent dir, then enter the last component */
+    u16 saved = g_cwd_cluster;
+    char name[13];
+    if (fat16_resolve_path(path, name) < 0) { g_cwd_cluster = saved; return -1; }
+    int r = chdir_one(name);
+    if (r < 0) g_cwd_cluster = saved;
+    return r;
 }
 
 /* ============================================================

@@ -161,6 +161,87 @@ def test_segfault(child: pexpect.spawn):
         return False, 'no "Segmentation fault" message'
 
 
+def test_paths(child: pexpect.spawn):
+    """Absolute and relative path support for file access and navigation."""
+
+    # 1. Read a file via absolute path from root
+    child.sendline('xxd /bin/hello')
+    try:
+        child.expect('00000000:', timeout=TIMEOUT_CMD)
+        wait_prompt(child)
+    except pexpect.TIMEOUT:
+        return False, 'xxd /bin/hello: no hex dump'
+
+    # 2. Change directory via absolute path
+    if not send_cmd(child, 'cd /bin'):
+        return False, 'cd /bin did not return prompt'
+
+    # 3. ls inside /bin should list hello
+    child.sendline('ls')
+    try:
+        child.expect(PROMPT, timeout=TIMEOUT_CMD)
+        if 'hello' not in child.before:
+            return False, 'hello not found after cd /bin'
+    except pexpect.TIMEOUT:
+        return False, 'ls timed out after cd /bin'
+
+    # 4. Read a file by name from inside /bin (relative, sanity check)
+    child.sendline('xxd hello')
+    try:
+        child.expect('00000000:', timeout=TIMEOUT_CMD)
+        wait_prompt(child)
+    except pexpect.TIMEOUT:
+        return False, 'xxd hello failed from inside /bin'
+
+    # 5. Jump back to root via absolute path
+    if not send_cmd(child, 'cd /'):
+        return False, 'cd / failed'
+
+    # 6. Create a nested directory and file, then read it back via path
+    if not send_cmd(child, 'mkdir pathtest'):
+        return False, 'mkdir pathtest failed'
+
+    child.sendline('vi /pathtest/deep.txt')
+    try:
+        child.expect(pexpect.TIMEOUT, timeout=2)
+    except pexpect.TIMEOUT:
+        pass
+    child.send('i')
+    child.send('pathdata')
+    child.send('\x1b')
+    child.send(':wq\r')
+    if not wait_prompt(child):
+        return False, 'vi /pathtest/deep.txt :wq failed'
+
+    child.sendline('xxd /pathtest/deep.txt')
+    try:
+        child.expect('00000000:', timeout=TIMEOUT_CMD)
+        wait_prompt(child)
+    except pexpect.TIMEOUT:
+        return False, 'xxd /pathtest/deep.txt: no hex dump'
+
+    # 7. Delete file and directory via paths
+    child.sendline('rm /pathtest/deep.txt')
+    try:
+        child.expect(r'\[y/N\]', timeout=TIMEOUT_CMD)
+    except pexpect.TIMEOUT:
+        return False, 'rm /pathtest/deep.txt: no [y/N]'
+    child.send('y')
+    if not wait_prompt(child):
+        return False, 'rm /pathtest/deep.txt failed'
+
+    child.sendline('rm /pathtest')
+    try:
+        child.expect(r'\[y/N\]', timeout=TIMEOUT_CMD)
+    except pexpect.TIMEOUT:
+        return False, 'rm /pathtest: no [y/N]'
+    child.send('y')
+    if not wait_prompt(child):
+        return False, 'rm /pathtest failed'
+
+    return True, 'xxd /bin/hello, cd /bin, vi /dir/file, xxd/rm via paths all work'
+
+
 def test_panic(child: pexpect.spawn):
     """panic utility triggers kernel panic; [PANIC] message appears on serial."""
     child.sendline('panic kernel panic test')
@@ -261,6 +342,7 @@ TESTS = [
     ('vi_quit',           test_vi_quit),
     ('segfault',          test_segfault),
     ('fs_operations',     test_fs_operations),
+    ('paths',             test_paths),
     ('panic',             test_panic),   # must be last — halts the system
 ]
 
