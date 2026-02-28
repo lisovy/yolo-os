@@ -943,8 +943,19 @@ static void program_exec(const char *filename, const char *args)
 
     exec_run();
 
-    /* Always restore text mode — the program may have switched to graphics. */
+    /* Detect whether the program switched to a graphics mode by comparing
+     * the current GC Miscellaneous register to the saved text-mode value.
+     * This check must happen BEFORE vga_restore_textmode() overwrites it. */
+    outb(0x3CE, 0x06);
+    int was_gfx = (inb(0x3CF) != saved_text_regs.gc[6]);
+
+    /* Restore VGA registers and font unconditionally. */
     vga_restore_textmode();
+    /* If the program left the VGA in graphics mode the text framebuffer is
+     * corrupted — clear it.  Text-mode programs are left as-is so their
+     * output stays visible. */
+    if (was_gfx)
+        vga_clear();
 
     /* Arrives here either via normal `ret` from the program or via SYS_EXIT. */
     char exitbuf[12];
