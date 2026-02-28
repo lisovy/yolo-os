@@ -40,17 +40,6 @@
 #define KEY_LEFT  0x82
 #define KEY_RIGHT 0x83
 
-/* RTC I/O ports and registers */
-#define RTC_INDEX   0x70
-#define RTC_DATA    0x71
-#define RTC_REG_SEC   0x00
-#define RTC_REG_MIN   0x02
-#define RTC_REG_HOUR  0x04
-#define RTC_REG_DAY   0x07
-#define RTC_REG_MON   0x08
-#define RTC_REG_YEAR  0x09
-#define RTC_REG_STA   0x0A   /* Status A: bit 7 = Update In Progress */
-#define RTC_REG_STB   0x0B   /* Status B: bit 2 = binary mode, bit 1 = 24h mode */
 
 /* ============================================================
  * I/O port helpers
@@ -398,68 +387,6 @@ static char kbd_getchar(void)
     return 0;
 }
 
-/* ============================================================
- * RTC — IBM PC Real Time Clock
- * ============================================================ */
-
-static unsigned char rtc_read(unsigned char reg)
-{
-    outb(RTC_INDEX, reg);
-    return inb(RTC_DATA);
-}
-
-static unsigned char bcd_to_bin(unsigned char bcd)
-{
-    return (unsigned char)(((bcd >> 4) * 10) + (bcd & 0x0F));
-}
-
-struct rtc_time {
-    int sec, min, hour, day, mon, year;
-};
-
-static void rtc_get_time(struct rtc_time *t)
-{
-    /* Wait until RTC is not in the middle of an update */
-    while (rtc_read(RTC_REG_STA) & 0x80)
-        ;
-
-    unsigned char sec  = rtc_read(RTC_REG_SEC);
-    unsigned char min  = rtc_read(RTC_REG_MIN);
-    unsigned char hour = rtc_read(RTC_REG_HOUR);
-    unsigned char day  = rtc_read(RTC_REG_DAY);
-    unsigned char mon  = rtc_read(RTC_REG_MON);
-    unsigned char yr   = rtc_read(RTC_REG_YEAR);
-    unsigned char stb  = rtc_read(RTC_REG_STB);
-
-    int binary = (stb & 0x04) != 0;
-    int h24    = (stb & 0x02) != 0;
-
-    /* In 12h mode bit 7 of the hour byte is the PM flag */
-    int pm = (!h24) && (hour & 0x80);
-    if (!h24) hour &= 0x7F;
-
-    if (!binary) {
-        sec  = bcd_to_bin(sec);
-        min  = bcd_to_bin(min);
-        hour = bcd_to_bin(hour);
-        day  = bcd_to_bin(day);
-        mon  = bcd_to_bin(mon);
-        yr   = bcd_to_bin(yr);
-    }
-
-    /* Convert 12h -> 24h if needed */
-    if (!h24) {
-        if (pm && hour != 12) hour = (unsigned char)(hour + 12);
-        else if (!pm && hour == 12) hour = 0;
-    }
-
-    t->sec  = sec;
-    t->min  = min;
-    t->hour = hour;
-    t->day  = day;
-    t->mon  = mon;
-    t->year = 2000 + yr;
-}
 
 /* ============================================================
  * ATA PIO driver — primary channel, master drive
