@@ -71,15 +71,21 @@ User programs and persistent data (`BOOT.TXT`) live in the FAT16 partition.
 After boot you get a simple interactive shell:
 
 ```
-> ls                    # list files on FAT16
+> ls                    # list files and dirs (dirs shown with trailing /)
 > run hello             # run hello.bin
 > run xxd BOOT.TXT      # run xxd.bin with argument "BOOT.TXT"
 > run vi notes.txt      # open notes.txt in the text editor
 > run demo              # start the graphics demo
+> mkdir docs            # create a subdirectory
+> cd docs               # enter it (prompt changes to /docs> )
+> cd ..                 # go up to parent
+> rm hello.bin          # delete file (prompts y/N)
+> mv foo.txt bar.txt    # rename within current directory
 ```
 
 - Left/right arrow keys move the cursor within the current line
 - Up/down arrows are ignored (no history)
+- Prompt shows current directory when not at root: `/docs> `
 
 ---
 

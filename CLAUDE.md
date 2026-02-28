@@ -108,10 +108,16 @@ File descriptors: 0=stdin, 1=stdout, 2–5=FAT16 files (max 4 open, 16 KB buffer
 
 ## Shell commands
 ```
-ls                    list files on FAT16
-run <name> [args]     load and execute <name>.bin from FAT16
+ls                    list files and dirs in cwd (dirs shown with trailing /)
+run <name> [args]     load and execute <name>.bin from cwd
+rm <name>             delete file or empty dir (prompts y/N)
+mkdir <name>          create a subdirectory in cwd
+mv <src> <dst>        rename file or dir within cwd (no cross-dir moves)
+cd <dir>              change directory; cd .. to go up; cd / or bare cd for root
 ```
 Arguments after the program name are passed via ARGS_BASE; read in programs with `get_args()`.
+Shell prompt shows cwd when not at root: `/subdir> `.
+`run` and file syscalls (open/read/write) use the current directory.
 Shell supports inline editing with left/right arrow keys.
 
 ## User programs (bin/)
@@ -138,7 +144,8 @@ kernel/entry.asm       32-bit kernel entry (_start → kernel_main); exec_run (I
 kernel/isr.asm         ISR stubs for INT 0-47 + 128
 kernel/idt.c           GDT + TSS setup (gdt_init), IDT setup, PIC remapping
 kernel/kernel.c        paging_init, VGA, keyboard, serial, ATA, syscalls, program loader, shell
-kernel/fat16.c         FAT16 R/W driver (fat16_init, fat16_read, fat16_write, fat16_listdir)
+kernel/fat16.c         FAT16 R/W driver (fat16_init, fat16_read, fat16_write, fat16_listdir,
+                       fat16_delete, fat16_mkdir, fat16_rename, fat16_chdir; cwd support)
 kernel/linker.ld       links kernel at 0x10000, entry.o first in .text
 bin/os.h               syscall header for user programs
 bin/user.ld            user program linker script

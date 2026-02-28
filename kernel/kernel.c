@@ -888,7 +888,11 @@ void isr_handler(struct registers *r)
 extern void idt_init(void);
 extern void gdt_init(void);
 extern int  fat16_init(void);
-extern int  fat16_listdir(void (*cb)(const char *name, unsigned int size));
+extern int  fat16_listdir(void (*cb)(const char *name, unsigned int size, int is_dir));
+extern int  fat16_delete(const char *name);
+extern int  fat16_mkdir(const char *name);
+extern int  fat16_rename(const char *src, const char *dst);
+extern int  fat16_chdir(const char *name);
 
 /* ============================================================
  * Kernel entry point
@@ -968,13 +972,20 @@ static const char *str_strip_prefix(const char *s, const char *prefix)
     return s;
 }
 
-static void ls_cb(const char *name, unsigned int size)
+/* Current working directory path for display (empty = root). */
+static char cwd_path[64] = "";
+
+static void ls_cb(const char *name, unsigned int size, int is_dir)
 {
-    char sizebuf[12];
-    uint_to_str(size, sizebuf);
     vga_print(name, COLOR_DEFAULT);
-    vga_print("  ", COLOR_DEFAULT);
-    vga_print(sizebuf, COLOR_DEFAULT);
+    if (is_dir) {
+        vga_putchar('/', COLOR_DEFAULT);
+    } else {
+        char sizebuf[12];
+        uint_to_str(size, sizebuf);
+        vga_print("  ", COLOR_DEFAULT);
+        vga_print(sizebuf, COLOR_DEFAULT);
+    }
     vga_putchar('\n', COLOR_DEFAULT);
 }
 
@@ -982,6 +993,99 @@ static void cmd_ls(void)
 {
     if (fat16_listdir(ls_cb) < 0)
         vga_print("ls: disk error\n", COLOR_DEFAULT);
+}
+
+static void cmd_rm(const char *name)
+{
+    vga_print("rm: delete '", COLOR_DEFAULT);
+    vga_print(name, COLOR_DEFAULT);
+    vga_print("'? [y/N] ", COLOR_DEFAULT);
+
+    char c = 0;
+    while (!c) c = kbd_getchar();
+    vga_putchar(c, COLOR_DEFAULT);
+    vga_putchar('\n', COLOR_DEFAULT);
+
+    if (c != 'y' && c != 'Y') return;
+
+    int r = fat16_delete(name);
+    if (r == -2)
+        vga_print("rm: directory not empty\n", COLOR_DEFAULT);
+    else if (r < 0)
+        vga_print("rm: not found\n", COLOR_DEFAULT);
+}
+
+static void cmd_mkdir(const char *name)
+{
+    if (fat16_mkdir(name) < 0)
+        vga_print("mkdir: failed\n", COLOR_DEFAULT);
+}
+
+static void cmd_mv(const char *args)
+{
+    char src[13], dst[13];
+    int i = 0, j = 0;
+
+    while (args[i] && args[i] != ' ' && i < 12) { src[i] = args[i]; i++; }
+    src[i] = '\0';
+    if (args[i] != ' ' || !src[0]) {
+        vga_print("mv: usage: mv <src> <dst>\n", COLOR_DEFAULT);
+        return;
+    }
+    i++;
+    while (args[i] && j < 12) { dst[j++] = args[i++]; }
+    dst[j] = '\0';
+    if (!dst[0]) {
+        vga_print("mv: usage: mv <src> <dst>\n", COLOR_DEFAULT);
+        return;
+    }
+
+    if (fat16_rename(src, dst) < 0)
+        vga_print("mv: failed\n", COLOR_DEFAULT);
+}
+
+/* Update cwd_path after a successful fat16_chdir(name). */
+static void update_cwd_after_cd(const char *name)
+{
+    if (name[0] == '/' && !name[1]) {
+        cwd_path[0] = '\0';
+        return;
+    }
+    if (name[0] == '.' && name[1] == '.' && !name[2]) {
+        int len = 0;
+        while (cwd_path[len]) len++;
+        if (len > 0) {
+            while (len > 0 && cwd_path[len - 1] != '/') len--;
+            if (len > 0) len--;  /* remove the '/' */
+        }
+        cwd_path[len] = '\0';
+        return;
+    }
+    /* Append /name */
+    int len = 0;
+    while (cwd_path[len]) len++;
+    if (len < (int)(sizeof(cwd_path) - 2)) {
+        cwd_path[len++] = '/';
+        int i = 0;
+        while (name[i] && len < (int)(sizeof(cwd_path) - 1))
+            cwd_path[len++] = name[i++];
+        cwd_path[len] = '\0';
+    }
+}
+
+static void cmd_cd(const char *name)
+{
+    if (!name || !name[0]) {
+        /* bare cd → go to root */
+        fat16_chdir("/");
+        cwd_path[0] = '\0';
+        return;
+    }
+    if (fat16_chdir(name) < 0) {
+        vga_print("cd: not found\n", COLOR_DEFAULT);
+        return;
+    }
+    update_cwd_after_cd(name);
 }
 
 static void program_exec(const char *filename, const char *args)
@@ -1115,6 +1219,7 @@ void kernel_main(void)
     }
 
     serial_print("[kernel] ready\n");
+    if (cwd_path[0]) vga_print(cwd_path, COLOR_PROMPT);
     vga_print("> ", COLOR_PROMPT);
 
     static char cmd[80];
@@ -1169,6 +1274,7 @@ void kernel_main(void)
             cursor_pos = 0;
 
             const char *rest = str_strip_prefix(cmd, "run ");
+            const char *arg;
             if (rest && *rest) {
                 /* split "PROG [ARGS...]" into name and args */
                 char prog[14];
@@ -1179,6 +1285,16 @@ void kernel_main(void)
                 program_exec(prog, args);
             } else if (cmd[0] == 'l' && cmd[1] == 's' && cmd[2] == '\0') {
                 cmd_ls();
+            } else if ((arg = str_strip_prefix(cmd, "rm ")) != 0 && *arg) {
+                cmd_rm(arg);
+            } else if ((arg = str_strip_prefix(cmd, "mkdir ")) != 0 && *arg) {
+                cmd_mkdir(arg);
+            } else if ((arg = str_strip_prefix(cmd, "mv ")) != 0 && *arg) {
+                cmd_mv(arg);
+            } else if ((arg = str_strip_prefix(cmd, "cd ")) != 0 && *arg) {
+                cmd_cd(arg);
+            } else if (cmd[0] == 'c' && cmd[1] == 'd' && !cmd[2]) {
+                cmd_cd(0);  /* bare cd → root */
             } else if (cmd[0] == '_' && cmd[1] == '_' &&
                        cmd[2] == 'e' && cmd[3] == 'x' && cmd[4] == 'i' &&
                        cmd[5] == 't' && cmd[6] == '\0') {
@@ -1190,6 +1306,7 @@ void kernel_main(void)
                 vga_print("unknown command\n", COLOR_DEFAULT);
             }
 
+            if (cwd_path[0]) vga_print(cwd_path, COLOR_PROMPT);
             vga_print("> ", COLOR_PROMPT);
             prompt_col = cursor_col;
             prompt_row = cursor_row;
