@@ -1120,6 +1120,7 @@ void kernel_main(void)
     switch_to_shell_pagedir();
     exec_run(PROG_BASE, USER_STACK_TOP);
 
-    /* Should not be reached — shell exiting is fatal */
+    /* Shell called exit() — unrecoverable */
+    vga_print("Shell exited. System halted.\n", COLOR_DEFAULT);
     for (;;) __asm__ volatile("hlt");
 }

@@ -47,6 +47,21 @@ static void vga_putc(int row, int col, char c, unsigned char attr)
     vga[row * VGA_COLS + col] = ((unsigned short)attr << 8) | (unsigned char)c;
 }
 
+/* Print string via write() (so serial/tests see it), then recolor in VGA */
+static void sh_print_colored(const char *s, unsigned char attr)
+{
+    int pos = getpos();
+    int row = pos >> 8;
+    int col = pos & 0xFF;
+    sh_print(s);          /* write() → VGA default color + serial */
+    while (*s) {          /* recolor the characters we just wrote */
+        vga_putc(row, col, *s++, attr);
+        col++;
+        if (col >= VGA_COLS) { col = 0; row++; }
+    }
+    /* cursor already at correct position after sh_print() */
+}
+
 /* Redraw the command line in-place without printing to avoid scrolling. */
 static void redraw_line(const char *cmd, int cmd_len, int cursor_pos,
                         int prompt_row, int prompt_col)
@@ -98,11 +113,11 @@ void main(void)
     int  cursor_pos = 0;
 
     for (;;) {
-        /* Print prompt */
+        /* Print prompt (green) */
         if (cwd_path[0]) {
-            sh_print(cwd_path);
+            sh_print_colored(cwd_path, COLOR_PROMPT);
         }
-        sh_print("> ");
+        sh_print_colored("> ", COLOR_PROMPT);
 
         /* Record where the editable part starts */
         int pos = getpos();
@@ -175,6 +190,18 @@ void main(void)
             cmd[5] == 't' && !cmd[6]) {
             outb(0xF4, 0x31);
             continue;
+        }
+
+        /* clear */
+        if (cmd[0]=='c' && cmd[1]=='l' && cmd[2]=='e' && cmd[3]=='a' &&
+            cmd[4]=='r' && !cmd[5]) {
+            clrscr();
+            continue;
+        }
+
+        /* exit */
+        if (cmd[0]=='e' && cmd[1]=='x' && cmd[2]=='i' && cmd[3]=='t' && !cmd[4]) {
+            exit(0);
         }
 
         /* cd [name] */
