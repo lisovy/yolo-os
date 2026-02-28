@@ -51,7 +51,7 @@ void main(void)
     for (;;) {
         /* Randomise the entire framebuffer each pass */
         for (int i = 0; i < FB_SIZE; i++)
-            fb[i] = (unsigned char)(rand_next() & 1); /* 0 = black, 1 = white */
+            fb[i] = (rand_next() & 1) ? 15 : 0; /* 0 = black, 15 = bright white */
 
         /* Check for 'q' without blocking the animation */
         int c = get_char_nonblock();
@@ -105,12 +105,6 @@ static void set_mode13h(void)
         outb(VGA_AC, ac[i]);
     }
     outb(VGA_AC, 0x20);  /* re-enable display */
-
-    /* DAC palette: index 0 = black, index 1 = white */
-    outb(VGA_DAC_W, 0);
-    outb(VGA_DAC_D, 0);  outb(VGA_DAC_D, 0);  outb(VGA_DAC_D, 0);
-    outb(VGA_DAC_W, 1);
-    outb(VGA_DAC_D, 63); outb(VGA_DAC_D, 63); outb(VGA_DAC_D, 63);
 
     /* Clear framebuffer to black */
     volatile unsigned char *fb = (volatile unsigned char *)FB_BASE;

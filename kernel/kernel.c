@@ -227,10 +227,11 @@ static void vga_save_state(void)
     for (i = 0; i < 9; i++)  { outb(0x3CE, (unsigned char)i); saved_text_regs.gc[i]   = inb(0x3CF); }
     for (i = 0; i < 21; i++) {
         inb(0x3DA);                              /* reset AC flip-flop */
-        outb(0x3C0, (unsigned char)i);
-        saved_text_regs.ac[i] = inb(0x3C1);
+        outb(0x3C0, (unsigned char)i);           /* write index (PAS=0) */
+        saved_text_regs.ac[i] = inb(0x3C1);     /* read data via 0x3C1 — flip-flop stays in data mode */
     }
-    outb(0x3C0, 0x20);  /* re-enable video display */
+    inb(0x3DA);         /* reset flip-flop back to index mode */
+    outb(0x3C0, 0x20);  /* write index 0x20 (PAS=1) to re-enable display */
 }
 
 /* Save the VGA character font from plane 2 (call once while in text mode). */
