@@ -624,6 +624,15 @@ struct registers {
 #define SYS_SETPOS           6   /* set VGA cursor: EBX=row, ECX=col       */
 #define SYS_CLRSCR           7   /* clear text area, cursor to 0,0         */
 #define SYS_GETCHAR_NONBLOCK 8   /* non-blocking keyread; 0 = no key ready */
+#define SYS_READDIR  9   /* (buf_ptr, max) → count of direntry structs */
+#define SYS_UNLINK  10   /* (name_ptr)     → 0/-1/-2(not-empty)        */
+#define SYS_MKDIR   11   /* (name_ptr)     → 0/-1                      */
+#define SYS_RENAME  12   /* (src, dst)     → 0/-1                      */
+#define SYS_EXEC    13   /* (name, args)   → child exit code or -1     */
+#define SYS_CHDIR   14   /* (name_ptr)     → 0/-1                      */
+#define SYS_GETPOS  15   /* ()             → row*256 + col             */
+
+struct direntry { char name[13]; unsigned int size; int is_dir; };
 
 #define FD_STDIN   0
 #define FD_STDOUT  1
@@ -648,6 +657,7 @@ static struct fd_entry g_fds[MAX_FILE_FDS];
 
 extern int fat16_read(const char *filename, unsigned char *buf, unsigned int max_bytes);
 extern int fat16_write(const char *filename, const unsigned char *data, unsigned int size);
+extern int fat16_read_from_bin(const char *name, unsigned char *buf, unsigned int max_bytes);
 
 static int sys_write(unsigned int fd, const char *buf, unsigned int len)
 {
@@ -738,7 +748,57 @@ static int sys_close(unsigned int fd)
 }
 
 extern unsigned int exec_ret_esp;  /* defined in entry.asm; used by SYS_EXIT */
-static unsigned int g_exit_code;   /* set by SYS_EXIT, printed by program_exec */
+static unsigned int g_exit_code;   /* set by SYS_EXIT, returned by SYS_EXEC */
+
+/* ============================================================
+ * Forward declarations needed by syscall_dispatch
+ * ============================================================ */
+
+/* Program loader constants */
+#define PROG_BASE      0x400000
+#define PROG_MAX_SIZE  (256 * 1024)
+#define ARGS_BASE      0x7FC000
+#define ARGS_MAX       200
+#define USER_STACK_TOP 0x7FF000
+
+/* High-memory kernel virtual addresses for loading binaries */
+#define SHELL_LOAD_VIRT  0x800000u
+#define SHELL_ARGS_KERN  0xBFC000u
+#define CHILD_LOAD_VIRT  0xC00000u
+#define CHILD_ARGS_KERN  0xFFC000u
+
+extern void         exec_run(unsigned int entry, unsigned int user_stack_top);
+extern int  fat16_listdir(void (*cb)(const char *name, unsigned int size, int is_dir));
+extern int  fat16_delete(const char *name);
+extern int  fat16_mkdir(const char *name);
+extern int  fat16_rename(const char *src, const char *dst);
+extern int  fat16_chdir(const char *name);
+
+static void switch_to_shell_pagedir(void);
+static void switch_to_child_pagedir(void);
+
+/* Directory listing buffer used by SYS_READDIR */
+#define LS_MAX_ENTRIES 64
+
+struct ls_entry {
+    char         name[13];
+    unsigned int size;
+    int          is_dir;
+};
+
+static struct ls_entry ls_buf[LS_MAX_ENTRIES];
+static int             ls_count;
+
+static void ls_collect(const char *name, unsigned int size, int is_dir)
+{
+    if (ls_count >= LS_MAX_ENTRIES) return;
+    int i = 0;
+    while (name[i] && i < 12) { ls_buf[ls_count].name[i] = name[i]; i++; }
+    ls_buf[ls_count].name[i] = '\0';
+    ls_buf[ls_count].size   = size;
+    ls_buf[ls_count].is_dir = is_dir;
+    ls_count++;
+}
 
 static void syscall_dispatch(struct registers *r)
 {
@@ -798,6 +858,82 @@ static void syscall_dispatch(struct registers *r)
     case SYS_GETCHAR_NONBLOCK:
         r->eax = (unsigned int)(unsigned char)kbd_getchar();
         break;
+    case SYS_READDIR: {
+        struct direntry *user_buf = (struct direntry *)r->ebx;
+        int max = (int)r->ecx;
+        ls_count = 0;
+        if (fat16_listdir(ls_collect) < 0) { r->eax = (unsigned int)-1; break; }
+        int rn = ls_count < max ? ls_count : max;
+        for (int ri = 0; ri < rn; ri++) {
+            int j;
+            for (j = 0; j < 12 && ls_buf[ri].name[j]; j++)
+                user_buf[ri].name[j] = ls_buf[ri].name[j];
+            user_buf[ri].name[j] = '\0';
+            user_buf[ri].size   = ls_buf[ri].size;
+            user_buf[ri].is_dir = ls_buf[ri].is_dir;
+        }
+        r->eax = (unsigned int)rn;
+        break;
+    }
+    case SYS_UNLINK:
+        r->eax = (unsigned int)fat16_delete((const char *)r->ebx);
+        break;
+    case SYS_MKDIR:
+        r->eax = (unsigned int)fat16_mkdir((const char *)r->ebx);
+        break;
+    case SYS_RENAME:
+        r->eax = (unsigned int)fat16_rename((const char *)r->ebx, (const char *)r->ecx);
+        break;
+    case SYS_CHDIR:
+        r->eax = (unsigned int)fat16_chdir((const char *)r->ebx);
+        break;
+    case SYS_GETPOS:
+        r->eax = (unsigned int)(cursor_row * 256 + cursor_col);
+        break;
+    case SYS_EXEC: {
+        char name[13], args[ARGS_MAX];
+        int xi;
+        const char *src_name = (const char *)r->ebx;
+        for (xi = 0; xi < 12 && src_name[xi]; xi++) name[xi] = src_name[xi];
+        name[xi] = '\0';
+        const char *src_args = (const char *)r->ecx;
+        for (xi = 0; xi < ARGS_MAX - 1 && src_args[xi]; xi++) args[xi] = src_args[xi];
+        args[xi] = '\0';
+
+        /* Save shell's exec return context */
+        unsigned int saved_exec_ret = exec_ret_esp;
+
+        /* Switch to child page directory and load binary */
+        switch_to_child_pagedir();
+        int xn = fat16_read_from_bin(name, (unsigned char *)CHILD_LOAD_VIRT, PROG_MAX_SIZE);
+        if (xn <= 0) {
+            switch_to_shell_pagedir();
+            exec_ret_esp = saved_exec_ret;
+            r->eax = (unsigned int)-1;
+            break;
+        }
+
+        /* Copy args to child's ARGS_BASE (kernel virt 0xFFC000 = phys 0xFFC000) */
+        char *dst = (char *)CHILD_ARGS_KERN;
+        for (xi = 0; xi < ARGS_MAX - 1 && args[xi]; xi++) dst[xi] = args[xi];
+        dst[xi] = '\0';
+
+        g_exit_code = 0;
+        exec_run(PROG_BASE, USER_STACK_TOP);
+
+        /* Child returned — detect and restore VGA if it switched to graphics */
+        outb(0x3CE, 0x06);
+        int xgfx = (inb(0x3CF) != saved_text_regs.gc[6]);
+        vga_restore_textmode();
+        if (xgfx) vga_clear();
+
+        /* Switch back to shell page directory and restore exec context */
+        switch_to_shell_pagedir();
+        exec_ret_esp = saved_exec_ret;
+
+        r->eax = (unsigned int)g_exit_code;
+        break;
+    }
     default:
         r->eax = (unsigned int)-1;
         break;
@@ -888,12 +1024,6 @@ void isr_handler(struct registers *r)
 extern void idt_init(void);
 extern void gdt_init(void);
 extern int  fat16_init(void);
-extern int  fat16_listdir(void (*cb)(const char *name, unsigned int size, int is_dir));
-extern int  fat16_delete(const char *name);
-extern int  fat16_mkdir(const char *name);
-extern int  fat16_rename(const char *src, const char *dst);
-extern int  fat16_chdir(const char *name);
-extern int  fat16_read_from_root(const char *filename, unsigned char *buf, unsigned int max_bytes);
 
 /* ============================================================
  * Kernel entry point
@@ -909,25 +1039,18 @@ static unsigned int parse_uint(const unsigned char *s, int len)
 }
 
 /* ============================================================
- * Program loader
- * ============================================================ */
-
-#define PROG_BASE     0x400000
-#define PROG_MAX_SIZE (256 * 1024)  /* 256 KB */
-#define ARGS_BASE     0x7FC000      /* args string written here before exec_run() */
-#define ARGS_MAX      200
-#define USER_STACK_TOP 0x7FF000     /* user stack top (grows down) */
-
-extern void         exec_run(unsigned int entry, unsigned int user_stack_top);
-extern unsigned int exec_ret_esp;
-
-/* ============================================================
  * Paging setup — identity map with U/S protection
  * ============================================================ */
 
-static unsigned int page_dir[1024]  __attribute__((aligned(4096)));
-static unsigned int pt_kernel[1024] __attribute__((aligned(4096)));  /* 0–4 MB, U=0 */
-static unsigned int pt_user[1024]   __attribute__((aligned(4096)));  /* 4–8 MB, U=1 */
+static unsigned int page_dir[1024]       __attribute__((aligned(4096)));
+static unsigned int pt_kernel[1024]      __attribute__((aligned(4096)));  /* 0–4 MB, U=0 */
+static unsigned int pt_user[1024]        __attribute__((aligned(4096)));  /* 4–8 MB, U=1 */
+static unsigned int pt_kern_high0[1024]  __attribute__((aligned(4096)));  /* 8–12 MB, U=0 */
+static unsigned int pt_kern_high1[1024]  __attribute__((aligned(4096)));  /* 12–16 MB, U=0 */
+static unsigned int page_dir_shell[1024] __attribute__((aligned(4096)));
+static unsigned int pt_user_shell[1024]  __attribute__((aligned(4096)));  /* virt 4–8MB → phys 8–12MB */
+static unsigned int page_dir_child[1024] __attribute__((aligned(4096)));
+static unsigned int pt_user_child[1024]  __attribute__((aligned(4096)));  /* virt 4–8MB → phys 12–16MB */
 
 static void paging_init(void)
 {
@@ -954,6 +1077,30 @@ static void paging_init(void)
     page_dir[0] = (unsigned int)pt_kernel | 0x07;   /* U=1 in PDE; individual PTEs enforce S/U */
     page_dir[1] = (unsigned int)pt_user   | 0x07;   /* user:   user-accessible */
 
+    /* Kernel high mappings (supervisor-only, identity): used to load binaries */
+    for (i = 0; i < 1024; i++) {
+        pt_kern_high0[i] = (unsigned int)(0x800000 + (i << 12)) | 0x03;  /* P+RW, U=0 */
+        pt_kern_high1[i] = (unsigned int)(0xC00000 + (i << 12)) | 0x03;
+    }
+    page_dir[2] = (unsigned int)pt_kern_high0 | 0x03;  /* virtual 0x800000–0xBFFFFF */
+    page_dir[3] = (unsigned int)pt_kern_high1 | 0x03;  /* virtual 0xC00000–0xFFFFFF */
+
+    /* Shell page directory: virtual 0x400000 → physical 0x800000 (U=1) */
+    for (i = 0; i < 1024; i++)
+        pt_user_shell[i] = (unsigned int)(0x800000 + (i << 12)) | 0x07;
+    page_dir_shell[0] = (unsigned int)pt_kernel     | 0x07;
+    page_dir_shell[1] = (unsigned int)pt_user_shell | 0x07;
+    page_dir_shell[2] = (unsigned int)pt_kern_high0 | 0x03;
+    page_dir_shell[3] = (unsigned int)pt_kern_high1 | 0x03;
+
+    /* Child page directory: virtual 0x400000 → physical 0xC00000 (U=1) */
+    for (i = 0; i < 1024; i++)
+        pt_user_child[i] = (unsigned int)(0xC00000 + (i << 12)) | 0x07;
+    page_dir_child[0] = (unsigned int)pt_kernel     | 0x07;
+    page_dir_child[1] = (unsigned int)pt_user_child | 0x07;
+    page_dir_child[2] = (unsigned int)pt_kern_high0 | 0x03;
+    page_dir_child[3] = (unsigned int)pt_kern_high1 | 0x03;
+
     /* Load CR3 and enable paging in CR0 */
     __asm__ volatile (
         "mov %0, %%cr3\n"
@@ -964,248 +1111,14 @@ static void paging_init(void)
     );
 }
 
-/* Returns pointer past prefix if s starts with prefix, else NULL. */
-static const char *str_strip_prefix(const char *s, const char *prefix)
+static void switch_to_shell_pagedir(void)
 {
-    while (*prefix) {
-        if (*s++ != *prefix++) return 0;
-    }
-    return s;
+    __asm__ volatile("mov %0, %%cr3" :: "r"(page_dir_shell) : "memory");
 }
 
-/* Current working directory path for display (empty = root). */
-static char cwd_path[64] = "";
-
-#define LS_MAX_ENTRIES 64
-
-struct ls_entry {
-    char         name[13];
-    unsigned int size;
-    int          is_dir;
-};
-
-static struct ls_entry ls_buf[LS_MAX_ENTRIES];
-static int             ls_count;
-
-static void ls_collect(const char *name, unsigned int size, int is_dir)
+static void switch_to_child_pagedir(void)
 {
-    if (ls_count >= LS_MAX_ENTRIES) return;
-    int i = 0;
-    while (name[i] && i < 12) { ls_buf[ls_count].name[i] = name[i]; i++; }
-    ls_buf[ls_count].name[i] = '\0';
-    ls_buf[ls_count].size   = size;
-    ls_buf[ls_count].is_dir = is_dir;
-    ls_count++;
-}
-
-static int str_lt(const char *a, const char *b)
-{
-    while (*a && *a == *b) { a++; b++; }
-    return (unsigned char)*a < (unsigned char)*b;
-}
-
-static void cmd_ls(void)
-{
-    ls_count = 0;
-    if (fat16_listdir(ls_collect) < 0) {
-        vga_print("ls: disk error\n", COLOR_DEFAULT);
-        return;
-    }
-
-    /* Bubble sort: directories before files, alphabetical within each group */
-    for (int i = 0; i < ls_count - 1; i++) {
-        for (int j = 0; j < ls_count - 1 - i; j++) {
-            struct ls_entry *a = &ls_buf[j];
-            struct ls_entry *b = &ls_buf[j + 1];
-            int swap = (a->is_dir < b->is_dir) ||
-                       (a->is_dir == b->is_dir && str_lt(b->name, a->name));
-            if (swap) {
-                struct ls_entry tmp = *a; *a = *b; *b = tmp;
-            }
-        }
-    }
-
-    for (int i = 0; i < ls_count; i++) {
-        vga_print(ls_buf[i].name, COLOR_DEFAULT);
-        if (ls_buf[i].is_dir) {
-            vga_putchar('/', COLOR_DEFAULT);
-        } else {
-            char sizebuf[12];
-            uint_to_str(ls_buf[i].size, sizebuf);
-            vga_print("  ", COLOR_DEFAULT);
-            vga_print(sizebuf, COLOR_DEFAULT);
-        }
-        vga_putchar('\n', COLOR_DEFAULT);
-    }
-}
-
-static void cmd_rm(const char *name)
-{
-    vga_print("rm: delete '", COLOR_DEFAULT);
-    vga_print(name, COLOR_DEFAULT);
-    vga_print("'? [y/N] ", COLOR_DEFAULT);
-
-    char c = 0;
-    while (!c) c = kbd_getchar();
-    vga_putchar(c, COLOR_DEFAULT);
-    vga_putchar('\n', COLOR_DEFAULT);
-
-    if (c != 'y' && c != 'Y') return;
-
-    int r = fat16_delete(name);
-    if (r == -2)
-        vga_print("rm: directory not empty\n", COLOR_DEFAULT);
-    else if (r < 0)
-        vga_print("rm: not found\n", COLOR_DEFAULT);
-}
-
-static void cmd_mkdir(const char *name)
-{
-    if (fat16_mkdir(name) < 0)
-        vga_print("mkdir: failed\n", COLOR_DEFAULT);
-}
-
-static void cmd_mv(const char *args)
-{
-    char src[13], dst[13];
-    int i = 0, j = 0;
-
-    while (args[i] && args[i] != ' ' && i < 12) { src[i] = args[i]; i++; }
-    src[i] = '\0';
-    if (args[i] != ' ' || !src[0]) {
-        vga_print("mv: usage: mv <src> <dst>\n", COLOR_DEFAULT);
-        return;
-    }
-    i++;
-    while (args[i] && j < 12) { dst[j++] = args[i++]; }
-    dst[j] = '\0';
-    if (!dst[0]) {
-        vga_print("mv: usage: mv <src> <dst>\n", COLOR_DEFAULT);
-        return;
-    }
-
-    if (fat16_rename(src, dst) < 0)
-        vga_print("mv: failed\n", COLOR_DEFAULT);
-}
-
-/* Update cwd_path after a successful fat16_chdir(name). */
-static void update_cwd_after_cd(const char *name)
-{
-    if (name[0] == '/' && !name[1]) {
-        cwd_path[0] = '\0';
-        return;
-    }
-    if (name[0] == '.' && name[1] == '.' && !name[2]) {
-        int len = 0;
-        while (cwd_path[len]) len++;
-        if (len > 0) {
-            while (len > 0 && cwd_path[len - 1] != '/') len--;
-            if (len > 0) len--;  /* remove the '/' */
-        }
-        cwd_path[len] = '\0';
-        return;
-    }
-    /* Append /name */
-    int len = 0;
-    while (cwd_path[len]) len++;
-    if (len < (int)(sizeof(cwd_path) - 2)) {
-        cwd_path[len++] = '/';
-        int i = 0;
-        while (name[i] && len < (int)(sizeof(cwd_path) - 1))
-            cwd_path[len++] = name[i++];
-        cwd_path[len] = '\0';
-    }
-}
-
-static void cmd_cd(const char *name)
-{
-    if (!name || !name[0]) {
-        /* bare cd → go to root */
-        fat16_chdir("/");
-        cwd_path[0] = '\0';
-        return;
-    }
-    if (fat16_chdir(name) < 0) {
-        vga_print("cd: not found\n", COLOR_DEFAULT);
-        return;
-    }
-    update_cwd_after_cd(name);
-}
-
-static void program_exec(const char *filename, const char *args)
-{
-    /* Append .bin so the user types "run xxd" and we look for "xxd.bin". */
-    char fname[18];
-    int fi = 0;
-    while (filename[fi] && fi < 8) { fname[fi] = filename[fi]; fi++; }
-    fname[fi++] = '.'; fname[fi++] = 'b'; fname[fi++] = 'i'; fname[fi++] = 'n';
-    fname[fi] = '\0';
-
-    int n = fat16_read_from_root(fname, (unsigned char *)PROG_BASE, PROG_MAX_SIZE);
-    if (n <= 0) {
-        vga_print("exec: not found: ", COLOR_DEFAULT);
-        vga_print(fname, COLOR_DEFAULT);
-        vga_putchar('\n', COLOR_DEFAULT);
-        serial_print("[exec] not found: ");
-        serial_print(filename);
-        serial_putchar('\n');
-        return;
-    }
-    serial_print("[exec] running: ");
-    serial_print(fname);
-    serial_putchar('\n');
-
-    /* Copy args string to fixed address so the program can read it */
-    char *dst = (char *)ARGS_BASE;
-    unsigned int ai = 0;
-    while (args[ai] && ai < ARGS_MAX - 1) { dst[ai] = args[ai]; ai++; }
-    dst[ai] = '\0';
-
-    /* Set TSS ring-0 stack so interrupt/syscall from ring 3 lands in kernel */
-    extern void tss_set_ring0_stack(unsigned int esp);
-    extern unsigned char tss_stack[4096];
-    tss_set_ring0_stack((unsigned int)tss_stack + sizeof(tss_stack));
-
-    exec_run(PROG_BASE, USER_STACK_TOP);
-
-    /* Detect whether the program switched to a graphics mode by comparing
-     * the current GC Miscellaneous register to the saved text-mode value.
-     * This check must happen BEFORE vga_restore_textmode() overwrites it. */
-    outb(0x3CE, 0x06);
-    int was_gfx = (inb(0x3CF) != saved_text_regs.gc[6]);
-
-    /* Restore VGA registers and font unconditionally. */
-    vga_restore_textmode();
-    /* If the program left the VGA in graphics mode the text framebuffer is
-     * corrupted — clear it.  Text-mode programs are left as-is so their
-     * output stays visible. */
-    if (was_gfx)
-        vga_clear();
-
-    /* Arrives here either via normal `ret` from the program or via SYS_EXIT. */
-    char exitbuf[12];
-    uint_to_str(g_exit_code, exitbuf);
-    vga_print("\nexited ", COLOR_DEFAULT);
-    vga_print(exitbuf, COLOR_DEFAULT);
-    vga_putchar('\n', COLOR_DEFAULT);
-    serial_print("[exec] exited "); serial_print(exitbuf); serial_putchar('\n');
-}
-
-/* Rewrite the shell command line in-place and move the hardware cursor. */
-static void shell_redraw_line(const char *cmd, int cmd_len, int cursor_pos,
-                               int prompt_col, int prompt_row)
-{
-    volatile unsigned short *vga = (volatile unsigned short *)VGA_MEMORY;
-    for (int i = 0; i < cmd_len; i++)
-        vga[prompt_row * VGA_COLS + prompt_col + i] =
-            (COLOR_DEFAULT << 8) | (unsigned char)cmd[i];
-    /* blank the cell just past the end to erase any deleted char */
-    if (prompt_col + cmd_len < VGA_COLS)
-        vga[prompt_row * VGA_COLS + prompt_col + cmd_len] =
-            (COLOR_DEFAULT << 8) | ' ';
-    cursor_col = prompt_col + cursor_pos;
-    cursor_row = prompt_row;
-    vga_update_hw_cursor();
+    __asm__ volatile("mov %0, %%cr3" :: "r"(page_dir_child) : "memory");
 }
 
 /* ============================================================
@@ -1263,110 +1176,19 @@ void kernel_main(void)
     }
 
     serial_print("[kernel] ready\n");
-    if (cwd_path[0]) vga_print(cwd_path, COLOR_PROMPT);
-    vga_print("> ", COLOR_PROMPT);
 
-    static char cmd[80];
-    int cmd_len    = 0;
-    int cursor_pos = 0;   /* insertion point within cmd, 0..cmd_len */
-    int prompt_col = cursor_col;
-    int prompt_row = cursor_row;
-
-    for (;;) {
-        int c = (unsigned char)kbd_getchar();
-        if (!c) continue;
-
-        if (c == KEY_LEFT) {
-            if (cursor_pos > 0) {
-                cursor_pos--;
-                cursor_col = prompt_col + cursor_pos;
-                cursor_row = prompt_row;
-                vga_update_hw_cursor();
-            }
-            continue;
-        }
-        if (c == KEY_RIGHT) {
-            if (cursor_pos < cmd_len) {
-                cursor_pos++;
-                cursor_col = prompt_col + cursor_pos;
-                cursor_row = prompt_row;
-                vga_update_hw_cursor();
-            }
-            continue;
-        }
-        if (c == KEY_UP || c == KEY_DOWN)
-            continue;
-
-        if (c == '\b') {
-            if (cursor_pos > 0) {
-                for (int i = cursor_pos - 1; i < cmd_len - 1; i++)
-                    cmd[i] = cmd[i + 1];
-                cmd_len--;
-                cursor_pos--;
-                shell_redraw_line(cmd, cmd_len, cursor_pos, prompt_col, prompt_row);
-            }
-            continue;
-        }
-
-        if (c == '\n') {
-            /* position cursor at line end before emitting newline */
-            cursor_col = prompt_col + cmd_len;
-            cursor_row = prompt_row;
-            vga_putchar('\n', COLOR_DEFAULT);
-            cmd[cmd_len] = '\0';
-            cmd_len    = 0;
-            cursor_pos = 0;
-
-            const char *rest = str_strip_prefix(cmd, "run ");
-            const char *arg;
-            if (rest && *rest) {
-                /* split "PROG [ARGS...]" into name and args */
-                char prog[14];
-                int pi = 0;
-                while (rest[pi] && rest[pi] != ' ' && pi < 13) { prog[pi] = rest[pi]; pi++; }
-                prog[pi] = '\0';
-                const char *args = (rest[pi] == ' ') ? &rest[pi + 1] : "";
-                program_exec(prog, args);
-            } else if (cmd[0] == 'l' && cmd[1] == 's' && cmd[2] == '\0') {
-                cmd_ls();
-            } else if ((arg = str_strip_prefix(cmd, "rm ")) != 0 && *arg) {
-                cmd_rm(arg);
-            } else if ((arg = str_strip_prefix(cmd, "mkdir ")) != 0 && *arg) {
-                cmd_mkdir(arg);
-            } else if ((arg = str_strip_prefix(cmd, "mv ")) != 0 && *arg) {
-                cmd_mv(arg);
-            } else if ((arg = str_strip_prefix(cmd, "cd ")) != 0 && *arg) {
-                cmd_cd(arg);
-            } else if (cmd[0] == 'c' && cmd[1] == 'd' && !cmd[2]) {
-                cmd_cd(0);  /* bare cd → root */
-            } else if (cmd[0] == '_' && cmd[1] == '_' &&
-                       cmd[2] == 'e' && cmd[3] == 'x' && cmd[4] == 'i' &&
-                       cmd[5] == 't' && cmd[6] == '\0') {
-                /* Signal QEMU to exit cleanly (used by automated tests).
-                 * Requires -device isa-debug-exit,iobase=0xf4,iosize=0x04.
-                 * QEMU exit code = (0x31 << 1) | 1 = 99. */
-                outb(0xF4, 0x31);
-            } else if (cmd[0]) {
-                vga_print("unknown command\n", COLOR_DEFAULT);
-            }
-
-            if (cwd_path[0]) vga_print(cwd_path, COLOR_PROMPT);
-            vga_print("> ", COLOR_PROMPT);
-            prompt_col = cursor_col;
-            prompt_row = cursor_row;
-            continue;
-        }
-
-        /* printable char: insert at cursor_pos */
-        if ((unsigned char)c >= 0x20 && (unsigned char)c < 0x7F &&
-                cmd_len < (int)sizeof(cmd) - 1 &&
-                prompt_col + cmd_len < VGA_COLS - 1) {
-            for (int i = cmd_len; i > cursor_pos; i--)
-                cmd[i] = cmd[i - 1];
-            cmd[cursor_pos] = (char)c;
-            cmd_len++;
-            cursor_pos++;
-            shell_redraw_line(cmd, cmd_len, cursor_pos, prompt_col, prompt_row);
-        }
+    /* Load shell binary into physical 0x800000 (kernel virtual 0x800000) */
+    int sh_n = fat16_read_from_bin("sh", (unsigned char *)SHELL_LOAD_VIRT, PROG_MAX_SIZE);
+    if (sh_n <= 0) {
+        vga_print("FATAL: /bin/sh not found\n", COLOR_ERR);
+        for (;;) __asm__ volatile("hlt");
     }
+    serial_print("[kernel] launching /bin/sh\n");
+
+    /* Switch to shell page directory and exec shell at virtual 0x400000 */
+    switch_to_shell_pagedir();
+    exec_run(PROG_BASE, USER_STACK_TOP);
+
+    /* Should not be reached — shell exiting is fatal */
+    for (;;) __asm__ volatile("hlt");
 }

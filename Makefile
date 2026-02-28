@@ -33,9 +33,11 @@ KELF      := $(BUILD)/kernel.elf
 KOBJS := $(BUILD)/entry.o $(BUILD)/isr.o $(BUILD)/idt.o \
          $(BUILD)/kernel.o $(BUILD)/fat16.o
 
-# User programs (flat binaries installed to FAT16; loaded by kernel at 0x400000)
+# User programs (flat binaries installed to /bin on FAT16)
 # To add a new program: add its .bin to USER_BINS and write a build rule below.
-USER_BINS := $(BUILD)/hello.bin $(BUILD)/xxd.bin $(BUILD)/vi.bin $(BUILD)/demo.bin $(BUILD)/segfault.bin
+USER_BINS := $(BUILD)/sh.bin $(BUILD)/hello.bin $(BUILD)/xxd.bin $(BUILD)/vi.bin \
+             $(BUILD)/demo.bin $(BUILD)/segfault.bin \
+             $(BUILD)/ls.bin $(BUILD)/rm.bin $(BUILD)/mkdir.bin $(BUILD)/mv.bin
 
 # ======================================================================
 .PHONY: all run clean newdisk test
@@ -92,6 +94,51 @@ $(BUILD)/segfault.elf: $(BUILD)/segfault.o bin/user.ld
 $(BUILD)/segfault.bin: $(BUILD)/segfault.elf
 	$(OBJCPY) -O binary $< $@
 
+$(BUILD)/sh.o: bin/sh.c bin/os.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/sh.elf: $(BUILD)/sh.o bin/user.ld
+	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
+
+$(BUILD)/sh.bin: $(BUILD)/sh.elf
+	$(OBJCPY) -O binary $< $@
+
+$(BUILD)/ls.o: bin/ls.c bin/os.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/ls.elf: $(BUILD)/ls.o bin/user.ld
+	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
+
+$(BUILD)/ls.bin: $(BUILD)/ls.elf
+	$(OBJCPY) -O binary $< $@
+
+$(BUILD)/rm.o: bin/rm.c bin/os.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/rm.elf: $(BUILD)/rm.o bin/user.ld
+	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
+
+$(BUILD)/rm.bin: $(BUILD)/rm.elf
+	$(OBJCPY) -O binary $< $@
+
+$(BUILD)/mkdir.o: bin/mkdir.c bin/os.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/mkdir.elf: $(BUILD)/mkdir.o bin/user.ld
+	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
+
+$(BUILD)/mkdir.bin: $(BUILD)/mkdir.elf
+	$(OBJCPY) -O binary $< $@
+
+$(BUILD)/mv.o: bin/mv.c bin/os.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/mv.elf: $(BUILD)/mv.o bin/user.ld
+	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
+
+$(BUILD)/mv.bin: $(BUILD)/mv.elf
+	$(OBJCPY) -O binary $< $@
+
 # --- Bootloader -------------------------------------------------------
 
 $(BOOT_IDE): boot/boot_ide.asm | $(BUILD)
@@ -146,10 +193,11 @@ $(DISK_IMG): $(KERNEL) $(BOOT_IDE) $(USER_BINS)
 	fi
 	bash scripts/patch_boot.sh $@ $(BOOT_IDE)
 	dd if=$(KERNEL) of=$@ bs=512 seek=1 conv=notrunc 2>/dev/null
+	mmd -i $@ ::bin 2>/dev/null || true
 	@for f in $(USER_BINS); do \
-	    name=$$(basename "$$f"); \
-	    mcopy -o -i $@ "$$f" "::$$name"; \
-	    echo "[disk] installed $$name"; \
+	    name=$$(basename "$$f" .bin); \
+	    mcopy -o -i $@ "$$f" "::bin/$$name"; \
+	    echo "[disk] installed bin/$$name"; \
 	done
 	@echo "[disk] $(DISK_IMG) updated (boot + kernel + user programs)"
 

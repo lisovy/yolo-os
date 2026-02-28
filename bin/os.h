@@ -29,6 +29,17 @@
 #define SYS_CLRSCR           7
 #define SYS_GETCHAR_NONBLOCK 8   /* non-blocking; returns 0 if no key ready */
 
+/* Syscall numbers — filesystem and process */
+#define SYS_READDIR  9
+#define SYS_UNLINK  10
+#define SYS_MKDIR   11
+#define SYS_RENAME  12
+#define SYS_EXEC    13
+#define SYS_CHDIR   14
+#define SYS_GETPOS  15
+
+struct direntry { char name[13]; unsigned int size; int is_dir; };
+
 /* Arrow key codes returned by get_char() */
 #define KEY_UP    0x80
 #define KEY_DOWN  0x81
@@ -99,6 +110,27 @@ static inline int get_char_nonblock(void) { return syscall(SYS_GETCHAR_NONBLOCK,
 static inline void set_pos(int row, int col) { syscall(SYS_SETPOS, row, col, 0); }
 /* Clear text area and home cursor */
 static inline void clrscr(void) { syscall(SYS_CLRSCR, 0, 0, 0); }
+/* Read directory entries into buf; returns count */
+static inline int readdir(struct direntry *buf, int max)
+    { return syscall(SYS_READDIR, (int)buf, max, 0); }
+/* Delete file or empty directory */
+static inline int unlink(const char *n)
+    { return syscall(SYS_UNLINK, (int)n, 0, 0); }
+/* Create directory */
+static inline int os_mkdir(const char *n)
+    { return syscall(SYS_MKDIR, (int)n, 0, 0); }
+/* Rename file or directory */
+static inline int os_rename(const char *s, const char *d)
+    { return syscall(SYS_RENAME, (int)s, (int)d, 0); }
+/* Execute a program from /bin; returns child exit code or -1 if not found */
+static inline int exec(const char *name, const char *args)
+    { return syscall(SYS_EXEC, (int)name, (int)args, 0); }
+/* Change current working directory */
+static inline int chdir(const char *name)
+    { return syscall(SYS_CHDIR, (int)name, 0, 0); }
+/* Get cursor position: high byte = row, low byte = col */
+static inline int getpos(void)
+    { return syscall(SYS_GETPOS, 0, 0, 0); }
 
 /* Direct hardware port I/O (ring 0 only) */
 static inline void outb(unsigned short port, unsigned char val)

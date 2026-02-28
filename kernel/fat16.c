@@ -797,3 +797,19 @@ int fat16_read_from_root(const char *filename, unsigned char *buf, unsigned int 
     g_cwd_cluster = saved;
     return r;
 }
+
+/* ============================================================
+ * fat16_read_from_bin — read a file from the /bin subdirectory.
+ * Temporarily changes cwd to /bin, reads the file, restores cwd.
+ * ============================================================ */
+
+int fat16_read_from_bin(const char *name, unsigned char *buf, unsigned int max_bytes)
+{
+    u16 saved = g_cwd_cluster;
+    g_cwd_cluster = 0;
+    int r = fat16_chdir("bin");
+    if (r < 0) { g_cwd_cluster = saved; return -1; }
+    int n = fat16_read(name, buf, max_bytes);
+    g_cwd_cluster = saved;
+    return n;
+}

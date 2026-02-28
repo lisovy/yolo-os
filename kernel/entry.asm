@@ -36,12 +36,20 @@ exec_ret_esp resd 1
 
 section .text
 
+extern tss_set_ring0_stack
+
 exec_run:
     push    ebp
     push    ebx
     push    esi
     push    edi
     mov     [exec_ret_esp], esp     ; save kernel ESP
+
+    ; Update TSS ring-0 stack so nested syscall from ring 3 lands below saved ESP,
+    ; preventing the ring-3 IRET frame from overwriting the saved kernel context.
+    push    dword [exec_ret_esp]
+    call    tss_set_ring0_stack
+    add     esp, 4
 
     ; Arguments on stack (adjusted for 4 pushes above):
     ;   [esp+20] = entry  (first arg)

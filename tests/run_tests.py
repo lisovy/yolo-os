@@ -83,8 +83,8 @@ def test_unknown_command(child: pexpect.spawn):
 
 
 def test_hello(child: pexpect.spawn):
-    """run hello prints a greeting containing 'Hello'."""
-    child.sendline('run hello')
+    """hello prints a greeting containing 'Hello'."""
+    child.sendline('hello')
     try:
         child.expect('Hello', timeout=TIMEOUT_CMD)
         wait_prompt(child)
@@ -94,24 +94,21 @@ def test_hello(child: pexpect.spawn):
 
 
 def test_ls(child: pexpect.spawn):
-    """ls lists the expected binaries."""
+    """ls lists bin/ directory."""
     child.sendline('ls')
-    expected = ['hello.bin', 'xxd.bin', 'vi.bin', 'demo.bin', 'segfault.bin']
     try:
-        # Collect output until next prompt
         child.expect(PROMPT, timeout=TIMEOUT_CMD)
         output = child.before
-        missing = [f for f in expected if f not in output]
-        if missing:
-            return False, f'missing files: {missing}'
-        return True, f'found {expected}'
+        if 'bin/' not in output:
+            return False, 'bin/ not listed'
+        return True, 'found bin/'
     except pexpect.TIMEOUT:
         return False, 'timeout waiting for ls output'
 
 
 def test_xxd(child: pexpect.spawn):
-    """run xxd BOOT.TXT prints a hex dump starting with an offset."""
-    child.sendline('run xxd BOOT.TXT')
+    """xxd BOOT.TXT prints a hex dump starting with an offset."""
+    child.sendline('xxd BOOT.TXT')
     try:
         # Hex dump lines start with "00000000:"
         child.expect('00000000:', timeout=TIMEOUT_CMD)
@@ -122,8 +119,8 @@ def test_xxd(child: pexpect.spawn):
 
 
 def test_xxd_missing_file(child: pexpect.spawn):
-    """run xxd on a non-existent file prints an error."""
-    child.sendline('run xxd NOSUCHFILE.TXT')
+    """xxd on a non-existent file prints an error."""
+    child.sendline('xxd NOSUCHFILE.TXT')
     try:
         child.expect('cannot open', timeout=TIMEOUT_CMD)
         wait_prompt(child)
@@ -133,8 +130,8 @@ def test_xxd_missing_file(child: pexpect.spawn):
 
 
 def test_vi_quit(child: pexpect.spawn):
-    """run vi opens the editor; :q! returns to the shell."""
-    child.sendline('run vi test.txt')
+    """vi opens the editor; :q! returns to the shell."""
+    child.sendline('vi test.txt')
     # vi redraws the screen; wait a moment for it to settle then send :q!
     try:
         # vi shows a status bar — we just wait a bit for any output
@@ -154,8 +151,8 @@ def test_vi_quit(child: pexpect.spawn):
 
 
 def test_segfault(child: pexpect.spawn):
-    """run segfault accesses kernel memory and is killed with 'Segmentation fault'."""
-    child.sendline('run segfault')
+    """segfault accesses kernel memory and is killed with 'Segmentation fault'."""
+    child.sendline('segfault')
     try:
         child.expect('Segmentation fault', timeout=TIMEOUT_CMD)
         wait_prompt(child)
@@ -183,8 +180,8 @@ def test_fs_operations(child: pexpect.spawn):
     if not send_cmd(child, 'cd testdir'):
         return False, 'cd testdir failed'
 
-    # 4. Create a file via vi (programs are always loaded from root)
-    child.sendline('run vi testfile.txt')
+    # 4. Create a file via vi
+    child.sendline('vi testfile.txt')
     try:
         child.expect(pexpect.TIMEOUT, timeout=2)
     except pexpect.TIMEOUT:
