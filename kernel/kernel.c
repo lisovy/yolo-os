@@ -521,6 +521,117 @@ struct registers {
     unsigned int eip, cs, eflags;  /* pushed by CPU */
 };
 
+/* ── panic screen ─────────────────────────────────────────────────────────
+ * Fills the entire 80×25 screen with a red background, prints the reason
+ * and a register dump (GP regs + CR0/CR2/CR3/CR4), then returns to the
+ * caller which should halt the CPU.
+ * -------------------------------------------------------------------------- */
+
+#define PANIC_BODY  0x4E   /* yellow on red */
+#define PANIC_HDR   0x4F   /* white  on red */
+
+static void ps_str(volatile unsigned short *v, int row, int col,
+                   const char *s, unsigned char a)
+{
+    while (*s && col < 80)
+        v[row * 80 + col++] = ((unsigned short)a << 8) | (unsigned char)*s++;
+}
+
+static void ps_hex(volatile unsigned short *v, int row, int col,
+                   unsigned int val, unsigned char a)
+{
+    const char h[] = "0123456789ABCDEF";
+    v[row*80+col+0] = ((unsigned short)a<<8)|'0';
+    v[row*80+col+1] = ((unsigned short)a<<8)|'x';
+    for (int i = 0; i < 8; i++)
+        v[row*80+col+2+i] = ((unsigned short)a<<8)|h[(val>>(28-4*i))&0xF];
+}
+
+/* Print label (padded to 6 chars) then "0xXXXXXXXX" at (row, col).
+ * Total width: 6 (label) + 1 (space) + 10 (hex) = 17 chars.
+ * Slots at cols 2, 22, 42, 62 → hex at cols 9, 29, 49, 69. */
+static void ps_reg(volatile unsigned short *v, int row, int col,
+                   const char *lbl, unsigned int val, unsigned char a)
+{
+    int c = col;
+    while (*lbl && (c - col) < 6)
+        v[row*80+c++] = ((unsigned short)a<<8)|(unsigned char)*lbl++;
+    while ((c - col) < 6)
+        v[row*80+c++] = ((unsigned short)a<<8)|' ';
+    v[row*80+c] = ((unsigned short)a<<8)|' ';   /* 1 space gap */
+    ps_hex(v, row, c + 1, val, a);
+}
+
+static void serial_hex(unsigned int val)
+{
+    const char h[] = "0123456789ABCDEF";
+    serial_putchar('0'); serial_putchar('x');
+    for (int i = 7; i >= 0; i--)
+        serial_putchar(h[(val >> (i*4)) & 0xF]);
+}
+
+static void panic_screen(const char *msg, struct registers *r)
+{
+    volatile unsigned short *vga = (volatile unsigned short *)0xB8000;
+
+    /* Fill entire screen with red background */
+    for (int i = 0; i < 80 * 25; i++)
+        vga[i] = ((unsigned short)PANIC_BODY << 8) | ' ';
+
+    /* Title (centred) */
+    ps_str(vga,  0, 30, "*** KERNEL PANIC ***", PANIC_HDR);
+
+    /* Reason */
+    ps_str(vga,  2,  1, "Reason: ", PANIC_HDR);
+    ps_str(vga,  2,  9, msg,        PANIC_BODY);
+
+    /* General purpose register section */
+    ps_str(vga,  4,  1, "General Purpose Registers", PANIC_HDR);
+    ps_reg(vga,  5,  2, "EAX",    r->eax,    PANIC_BODY);
+    ps_reg(vga,  5, 22, "EBX",    r->ebx,    PANIC_BODY);
+    ps_reg(vga,  5, 42, "ECX",    r->ecx,    PANIC_BODY);
+    ps_reg(vga,  5, 62, "EDX",    r->edx,    PANIC_BODY);
+    ps_reg(vga,  6,  2, "ESI",    r->esi,    PANIC_BODY);
+    ps_reg(vga,  6, 22, "EDI",    r->edi,    PANIC_BODY);
+    ps_reg(vga,  6, 42, "EBP",    r->ebp,    PANIC_BODY);
+    ps_reg(vga,  6, 62, "ESP",    r->esp,    PANIC_BODY);
+    ps_reg(vga,  7,  2, "EIP",    r->eip,    PANIC_BODY);
+    ps_reg(vga,  7, 22, "EFLAGS", r->eflags, PANIC_BODY);
+    ps_reg(vga,  7, 42, "CS",     r->cs,     PANIC_BODY);
+    ps_reg(vga,  7, 62, "DS",     r->ds,     PANIC_BODY);
+
+    /* Control register section */
+    ps_str(vga,  9,  1, "Control Registers", PANIC_HDR);
+    unsigned int cr0, cr2, cr3, cr4;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    ps_reg(vga, 10,  2, "CR0", cr0, PANIC_BODY);
+    ps_reg(vga, 10, 22, "CR2", cr2, PANIC_BODY);
+    ps_reg(vga, 10, 42, "CR3", cr3, PANIC_BODY);
+    ps_reg(vga, 10, 62, "CR4", cr4, PANIC_BODY);
+
+    /* Serial dump */
+    serial_print("[PANIC] "); serial_print(msg); serial_putchar('\n');
+    serial_print("[PANIC] EAX="); serial_hex(r->eax);
+    serial_print(" EBX=");        serial_hex(r->ebx);
+    serial_print(" ECX=");        serial_hex(r->ecx);
+    serial_print(" EDX=");        serial_hex(r->edx); serial_putchar('\n');
+    serial_print("[PANIC] ESI="); serial_hex(r->esi);
+    serial_print(" EDI=");        serial_hex(r->edi);
+    serial_print(" EBP=");        serial_hex(r->ebp);
+    serial_print(" ESP=");        serial_hex(r->esp); serial_putchar('\n');
+    serial_print("[PANIC] EIP="); serial_hex(r->eip);
+    serial_print(" EFLAGS=");     serial_hex(r->eflags);
+    serial_print(" CS=");         serial_hex(r->cs);
+    serial_print(" DS=");         serial_hex(r->ds);  serial_putchar('\n');
+    serial_print("[PANIC] CR0="); serial_hex(cr0);
+    serial_print(" CR2=");        serial_hex(cr2);
+    serial_print(" CR3=");        serial_hex(cr3);
+    serial_print(" CR4=");        serial_hex(cr4);    serial_putchar('\n');
+}
+
 /* ============================================================
  * Syscall interface — int 0x80
  *
@@ -821,12 +932,7 @@ static void syscall_dispatch(struct registers *r)
         r->eax = (unsigned int)(cursor_row * 256 + cursor_col);
         break;
     case SYS_PANIC:
-        vga_print("\n\n *** KERNEL PANIC: ", COLOR_ERR);
-        vga_print((const char *)r->ebx, COLOR_ERR);
-        vga_print(" *** \n", COLOR_ERR);
-        serial_print("[PANIC] ");
-        serial_print((const char *)r->ebx);
-        serial_putchar('\n');
+        panic_screen((const char *)r->ebx, r);
         for (;;) __asm__ volatile("hlt");
         break;
     case SYS_EXEC: {
@@ -939,17 +1045,8 @@ void isr_handler(struct registers *r)
         }
 
         /* CPU exception — print panic screen and halt */
-        vga_print("\n\n *** KERNEL PANIC: ", COLOR_ERR);
-        vga_print(exception_name(r->int_no), COLOR_ERR);
-        vga_print(" *** \n", COLOR_ERR);
-        serial_print("[PANIC] exception ");
-        char tmp[4];
-        uint_to_str(r->int_no, tmp);
-        serial_print(tmp);
-        serial_print(": ");
-        serial_print(exception_name(r->int_no));
-        serial_putchar('\n');
-        for (;;) __asm__ volatile ("hlt");
+        panic_screen(exception_name(r->int_no), r);
+        for (;;) __asm__ volatile("hlt");
 
     } else if (r->int_no < 48) {
         /* Hardware IRQ — send EOI and return */
