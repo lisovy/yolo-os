@@ -695,11 +695,13 @@ static unsigned int g_exit_code;   /* set by SYS_EXIT, returned by SYS_EXEC */
 #define CHILD_ARGS_KERN  0xFFC000u
 
 extern void         exec_run(unsigned int entry, unsigned int user_stack_top);
-extern int  fat16_listdir(void (*cb)(const char *name, unsigned int size, int is_dir));
-extern int  fat16_delete(const char *name);
-extern int  fat16_mkdir(const char *name);
-extern int  fat16_rename(const char *src, const char *dst);
-extern int  fat16_chdir(const char *name);
+extern int            fat16_listdir(void (*cb)(const char *name, unsigned int size, int is_dir));
+extern int            fat16_delete(const char *name);
+extern int            fat16_mkdir(const char *name);
+extern int            fat16_rename(const char *src, const char *dst);
+extern int            fat16_chdir(const char *name);
+extern unsigned short fat16_get_cwd_cluster(void);
+extern void           fat16_set_cwd_cluster(unsigned short c);
 
 static void switch_to_shell_pagedir(void);
 static void switch_to_child_pagedir(void);
@@ -827,8 +829,9 @@ static void syscall_dispatch(struct registers *r)
         for (xi = 0; xi < ARGS_MAX - 1 && src_args[xi]; xi++) args[xi] = src_args[xi];
         args[xi] = '\0';
 
-        /* Save shell's exec return context */
-        unsigned int saved_exec_ret = exec_ret_esp;
+        /* Save shell's exec return context and current working directory */
+        unsigned int   saved_exec_ret = exec_ret_esp;
+        unsigned short saved_cwd      = fat16_get_cwd_cluster();
 
         /* Switch to child page directory and load binary */
         switch_to_child_pagedir();
@@ -854,8 +857,9 @@ static void syscall_dispatch(struct registers *r)
         vga_restore_textmode();
         if (xgfx) vga_clear();
 
-        /* Switch back to shell page directory and restore exec context */
+        /* Switch back to shell page directory and restore exec context + cwd */
         switch_to_shell_pagedir();
+        fat16_set_cwd_cluster(saved_cwd);
         exec_ret_esp = saved_exec_ret;
 
         r->eax = (unsigned int)g_exit_code;

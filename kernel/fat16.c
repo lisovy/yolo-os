@@ -803,6 +803,10 @@ int fat16_read_from_root(const char *filename, unsigned char *buf, unsigned int 
  * Temporarily changes cwd to /bin, reads the file, restores cwd.
  * ============================================================ */
 
+/* Return / restore the raw cwd cluster so callers can save and restore it. */
+u16  fat16_get_cwd_cluster(void)       { return g_cwd_cluster; }
+void fat16_set_cwd_cluster(u16 c)      { g_cwd_cluster = c; }
+
 int fat16_read_from_bin(const char *name, unsigned char *buf, unsigned int max_bytes)
 {
     u16 saved = g_cwd_cluster;

@@ -27,6 +27,16 @@ static void uint_to_str(unsigned int n, char *out)
 
 void main(void)
 {
+    const char *arg = get_args();
+    if (arg && arg[0]) {
+        if (chdir(arg) < 0) {
+            print("ls: not found: ");
+            print(arg);
+            write(STDOUT, "\n", 1);
+            exit(1);
+        }
+    }
+
     int n = readdir(entries, LS_MAX);
     if (n < 0) {
         print("ls: disk error\n");
