@@ -24,9 +24,10 @@
 #define O_WRONLY 1
 
 /* Syscall numbers — screen control */
-#define SYS_GETCHAR  5
-#define SYS_SETPOS   6
-#define SYS_CLRSCR   7
+#define SYS_GETCHAR          5
+#define SYS_SETPOS           6
+#define SYS_CLRSCR           7
+#define SYS_GETCHAR_NONBLOCK 8   /* non-blocking; returns 0 if no key ready */
 
 /* Arrow key codes returned by get_char() */
 #define KEY_UP    0x80
@@ -92,9 +93,23 @@ static inline int print(const char *s)
 
 /* Blocking raw keyread — no echo, no line buffering */
 static inline int get_char(void) { return syscall(SYS_GETCHAR, 0, 0, 0); }
+/* Non-blocking raw keyread — returns 0 immediately if no key is ready */
+static inline int get_char_nonblock(void) { return syscall(SYS_GETCHAR_NONBLOCK, 0, 0, 0); }
 /* Move VGA cursor to (row, col) */
 static inline void set_pos(int row, int col) { syscall(SYS_SETPOS, row, col, 0); }
-/* Clear text area (rows 0-23) and home cursor */
+/* Clear text area and home cursor */
 static inline void clrscr(void) { syscall(SYS_CLRSCR, 0, 0, 0); }
+
+/* Direct hardware port I/O (ring 0 only) */
+static inline void outb(unsigned short port, unsigned char val)
+{
+    __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+static inline unsigned char inb(unsigned short port)
+{
+    unsigned char val;
+    __asm__ volatile ("inb %1, %0" : "=a"(val) : "Nd"(port));
+    return val;
+}
 
 #endif /* OS_H */

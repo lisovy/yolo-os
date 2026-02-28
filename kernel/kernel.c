@@ -202,6 +202,113 @@ static void vga_print(const char *s, unsigned char color)
 }
 
 /* ============================================================
+ * VGA mode save / restore
+ * Saves the text-mode register state and font at startup so the
+ * kernel can recover after a graphics-mode user program exits.
+ * ============================================================ */
+
+static struct {
+    unsigned char misc;
+    unsigned char seq[5];
+    unsigned char crtc[25];
+    unsigned char gc[9];
+    unsigned char ac[21];
+} saved_text_regs;
+
+static unsigned char saved_font[4096];  /* 256 chars × 16 bytes */
+
+/* Save every VGA register (call once while in text mode). */
+static void vga_save_state(void)
+{
+    int i;
+    saved_text_regs.misc = inb(0x3CC);
+    for (i = 0; i < 5; i++)  { outb(0x3C4, (unsigned char)i); saved_text_regs.seq[i]  = inb(0x3C5); }
+    for (i = 0; i < 25; i++) { outb(0x3D4, (unsigned char)i); saved_text_regs.crtc[i] = inb(0x3D5); }
+    for (i = 0; i < 9; i++)  { outb(0x3CE, (unsigned char)i); saved_text_regs.gc[i]   = inb(0x3CF); }
+    for (i = 0; i < 21; i++) {
+        inb(0x3DA);                              /* reset AC flip-flop */
+        outb(0x3C0, (unsigned char)i);
+        saved_text_regs.ac[i] = inb(0x3C1);
+    }
+    outb(0x3C0, 0x20);  /* re-enable video display */
+}
+
+/* Save the VGA character font from plane 2 (call once while in text mode). */
+static void vga_save_font(void)
+{
+    unsigned char old_seq4, old_gc4, old_gc5, old_gc6;
+    outb(0x3C4, 0x04); old_seq4 = inb(0x3C5);
+    outb(0x3CE, 0x04); old_gc4  = inb(0x3CF);
+    outb(0x3CE, 0x05); old_gc5  = inb(0x3CF);
+    outb(0x3CE, 0x06); old_gc6  = inb(0x3CF);
+
+    /* Reconfigure to read plane 2 linearly at A000h */
+    outb(0x3C4, 0x04); outb(0x3C5, 0x06);  /* seq: sequential, no chain4 */
+    outb(0x3CE, 0x04); outb(0x3CF, 0x02);  /* read map: plane 2 */
+    outb(0x3CE, 0x05); outb(0x3CF, 0x00);  /* GC mode: read mode 0 */
+    outb(0x3CE, 0x06); outb(0x3CF, 0x04);  /* GC misc: A000h 64 KB */
+
+    volatile unsigned char *fb = (volatile unsigned char *)0xA0000;
+    for (int i = 0; i < 4096; i++)
+        saved_font[i] = fb[i];
+
+    outb(0x3C4, 0x04); outb(0x3C5, old_seq4);
+    outb(0x3CE, 0x04); outb(0x3CF, old_gc4);
+    outb(0x3CE, 0x05); outb(0x3CF, old_gc5);
+    outb(0x3CE, 0x06); outb(0x3CF, old_gc6);
+}
+
+/* Restore the saved VGA register state. */
+static void vga_restore_state(void)
+{
+    int i;
+    outb(0x3C2, saved_text_regs.misc);
+
+    /* Sequencer: assert synchronous reset, restore, then deassert */
+    outb(0x3C4, 0x00); outb(0x3C5, 0x01);
+    for (i = 1; i < 5; i++) { outb(0x3C4, (unsigned char)i); outb(0x3C5, saved_text_regs.seq[i]); }
+    outb(0x3C4, 0x00); outb(0x3C5, 0x03);
+
+    /* CRTC: unlock write-protected registers first */
+    outb(0x3D4, 0x11); outb(0x3D5, saved_text_regs.crtc[0x11] & 0x7F);
+    for (i = 0; i < 25; i++) { outb(0x3D4, (unsigned char)i); outb(0x3D5, saved_text_regs.crtc[i]); }
+
+    for (i = 0; i < 9; i++)  { outb(0x3CE, (unsigned char)i); outb(0x3CF, saved_text_regs.gc[i]); }
+
+    inb(0x3DA);  /* reset AC flip-flop */
+    for (i = 0; i < 21; i++) { outb(0x3C0, (unsigned char)i); outb(0x3C0, saved_text_regs.ac[i]); }
+    outb(0x3C0, 0x20);  /* re-enable video */
+}
+
+/* Restore the font to VGA plane 2 (call after vga_restore_state). */
+static void vga_restore_font(void)
+{
+    /* Write to plane 2 only, sequential addressing at A000h */
+    outb(0x3C4, 0x02); outb(0x3C5, 0x04);  /* map mask: plane 2 */
+    outb(0x3C4, 0x04); outb(0x3C5, 0x06);  /* mem mode: sequential */
+    outb(0x3CE, 0x05); outb(0x3CF, 0x00);  /* GC mode: write mode 0 */
+    outb(0x3CE, 0x06); outb(0x3CF, 0x04);  /* GC misc: A000h 64 KB */
+
+    volatile unsigned char *fb = (volatile unsigned char *)0xA0000;
+    for (int i = 0; i < 4096; i++)
+        fb[i] = saved_font[i];
+
+    /* Restore exact text-mode values for the modified registers */
+    outb(0x3C4, 0x02); outb(0x3C5, saved_text_regs.seq[2]);
+    outb(0x3C4, 0x04); outb(0x3C5, saved_text_regs.seq[4]);
+    outb(0x3CE, 0x05); outb(0x3CF, saved_text_regs.gc[5]);
+    outb(0x3CE, 0x06); outb(0x3CF, saved_text_regs.gc[6]);
+}
+
+/* Full text-mode recovery — called by program_exec() after every user program. */
+static void vga_restore_textmode(void)
+{
+    vga_restore_state();
+    vga_restore_font();
+    vga_clear();
+}
+
+/* ============================================================
  * PS/2 keyboard driver — scan code set 1, US QWERTY
  * ============================================================ */
 
@@ -564,9 +671,10 @@ struct registers {
 #define SYS_READ    2
 #define SYS_OPEN    3
 #define SYS_CLOSE   4
-#define SYS_GETCHAR 5   /* blocking raw keyread, no echo    */
-#define SYS_SETPOS  6   /* set VGA cursor: EBX=row, ECX=col */
-#define SYS_CLRSCR  7   /* clear text area, cursor to 0,0   */
+#define SYS_GETCHAR          5   /* blocking raw keyread, no echo          */
+#define SYS_SETPOS           6   /* set VGA cursor: EBX=row, ECX=col       */
+#define SYS_CLRSCR           7   /* clear text area, cursor to 0,0         */
+#define SYS_GETCHAR_NONBLOCK 8   /* non-blocking keyread; 0 = no key ready */
 
 #define FD_STDIN   0
 #define FD_STDOUT  1
@@ -738,6 +846,9 @@ static void syscall_dispatch(struct registers *r)
         vga_clear();
         r->eax = 0;
         break;
+    case SYS_GETCHAR_NONBLOCK:
+        r->eax = (unsigned int)(unsigned char)kbd_getchar();
+        break;
     default:
         r->eax = (unsigned int)-1;
         break;
@@ -889,6 +1000,9 @@ static void program_exec(const char *filename, const char *args)
 
     exec_run();
 
+    /* Always restore text mode — the program may have switched to graphics. */
+    vga_restore_textmode();
+
     /* Arrives here either via normal `ret` from the program or via SYS_EXIT. */
     char exitbuf[12];
     uint_to_str(g_exit_code, exitbuf);
@@ -928,6 +1042,8 @@ void kernel_main(void)
     __asm__ volatile ("sti");
     serial_print("[kernel] IDT ready\n");
 
+    vga_save_state();   /* capture BIOS text-mode register state */
+    vga_save_font();    /* capture BIOS font from VGA plane 2    */
     vga_clear();
     serial_print("[kernel] VGA cleared\n");
 

@@ -35,7 +35,7 @@ KOBJS := $(BUILD)/entry.o $(BUILD)/isr.o $(BUILD)/idt.o \
 
 # User programs (flat binaries installed to FAT16; loaded by kernel at 0x400000)
 # To add a new program: add its .bin to USER_BINS and write a build rule below.
-USER_BINS := $(BUILD)/hello.bin $(BUILD)/xxd.bin $(BUILD)/vi.bin
+USER_BINS := $(BUILD)/hello.bin $(BUILD)/xxd.bin $(BUILD)/vi.bin $(BUILD)/demo.bin
 
 # ======================================================================
 .PHONY: all run clean newdisk
@@ -72,6 +72,15 @@ $(BUILD)/vi.elf: $(BUILD)/vi.o bin/user.ld
 	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
 
 $(BUILD)/vi.bin: $(BUILD)/vi.elf
+	$(OBJCPY) -O binary $< $@
+
+$(BUILD)/demo.o: bin/demo.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/demo.elf: $(BUILD)/demo.o bin/user.ld
+	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
+
+$(BUILD)/demo.bin: $(BUILD)/demo.elf
 	$(OBJCPY) -O binary $< $@
 
 # --- Bootloader -------------------------------------------------------
