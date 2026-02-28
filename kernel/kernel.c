@@ -301,12 +301,13 @@ static void vga_restore_font(void)
     outb(0x3CE, 0x06); outb(0x3CF, saved_text_regs.gc[6]);
 }
 
-/* Full text-mode recovery — called by program_exec() after every user program. */
+/* Full text-mode recovery — called by program_exec() after every user program.
+ * Restores VGA registers and font without clearing the framebuffer so that
+ * the output of text-mode programs remains visible after they exit. */
 static void vga_restore_textmode(void)
 {
     vga_restore_state();
     vga_restore_font();
-    vga_clear();
 }
 
 /* ============================================================
