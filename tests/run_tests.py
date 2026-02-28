@@ -151,8 +151,8 @@ def test_vi_quit(child: pexpect.spawn):
 
 
 def test_segfault(child: pexpect.spawn):
-    """segfault accesses kernel memory and is killed with 'Segmentation fault'."""
-    child.sendline('segfault')
+    """t_segflt accesses kernel memory and is killed with 'Segmentation fault'."""
+    child.sendline('t_segflt')
     try:
         child.expect('Segmentation fault', timeout=TIMEOUT_CMD)
         wait_prompt(child)
@@ -291,8 +291,8 @@ def test_malloc_oob(child: pexpect.spawn):
 
 
 def test_panic(child: pexpect.spawn):
-    """panic utility triggers kernel panic; [PANIC] message appears on serial."""
-    child.sendline('panic kernel panic test')
+    """t_panic utility triggers kernel panic; [PANIC] message appears on serial."""
+    child.sendline('t_panic kernel panic test')
     try:
         child.expect(r'\[PANIC\] kernel panic test', timeout=TIMEOUT_CMD)
         return True, 'kernel panic triggered, [PANIC] confirmed on serial'
@@ -388,13 +388,13 @@ TESTS = [
     ('xxd',               test_xxd),
     ('xxd_missing_file',  test_xxd_missing_file),
     ('vi_quit',           test_vi_quit),
-    ('segfault',          test_segfault),
+    ('t_segflt',          test_segfault),
     ('fs_operations',     test_fs_operations),
     ('paths',             test_paths),
     ('free',              test_free),
     ('t_mall1',           test_malloc),
     ('t_mall2',           test_malloc_oob),
-    ('panic',             test_panic),   # must be last — halts the system
+    ('t_panic',           test_panic),   # must be last — halts the system
 ]
 
 # ── main ───────────────────────────────────────────────────────────────────────

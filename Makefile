@@ -36,9 +36,9 @@ KOBJS := $(BUILD)/entry.o $(BUILD)/isr.o $(BUILD)/idt.o \
 # User programs (flat binaries installed to /bin on FAT16)
 # To add a new program: add its .bin to USER_BINS and write a build rule below.
 USER_BINS := $(BUILD)/sh.bin $(BUILD)/hello.bin $(BUILD)/xxd.bin $(BUILD)/vi.bin \
-             $(BUILD)/demo.bin $(BUILD)/segfault.bin \
+             $(BUILD)/demo.bin $(BUILD)/t_segflt.bin \
              $(BUILD)/ls.bin $(BUILD)/rm.bin $(BUILD)/mkdir.bin $(BUILD)/mv.bin \
-             $(BUILD)/panic.bin $(BUILD)/free.bin \
+             $(BUILD)/t_panic.bin $(BUILD)/free.bin \
              $(BUILD)/t_mall1.bin $(BUILD)/t_mall2.bin
 
 # ======================================================================
@@ -87,13 +87,13 @@ $(BUILD)/demo.elf: $(BUILD)/demo.o bin/user.ld
 $(BUILD)/demo.bin: $(BUILD)/demo.elf
 	$(OBJCPY) -O binary $< $@
 
-$(BUILD)/segfault.o: bin/segfault.c bin/os.h | $(BUILD)
+$(BUILD)/t_segflt.o: bin/t_segflt.c bin/os.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/segfault.elf: $(BUILD)/segfault.o bin/user.ld
+$(BUILD)/t_segflt.elf: $(BUILD)/t_segflt.o bin/user.ld
 	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
 
-$(BUILD)/segfault.bin: $(BUILD)/segfault.elf
+$(BUILD)/t_segflt.bin: $(BUILD)/t_segflt.elf
 	$(OBJCPY) -O binary $< $@
 
 $(BUILD)/sh.o: bin/sh.c bin/os.h | $(BUILD)
@@ -141,13 +141,13 @@ $(BUILD)/mv.elf: $(BUILD)/mv.o bin/user.ld
 $(BUILD)/mv.bin: $(BUILD)/mv.elf
 	$(OBJCPY) -O binary $< $@
 
-$(BUILD)/panic.o: bin/panic.c bin/os.h | $(BUILD)
+$(BUILD)/t_panic.o: bin/t_panic.c bin/os.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/panic.elf: $(BUILD)/panic.o bin/user.ld
+$(BUILD)/t_panic.elf: $(BUILD)/t_panic.o bin/user.ld
 	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
 
-$(BUILD)/panic.bin: $(BUILD)/panic.elf
+$(BUILD)/t_panic.bin: $(BUILD)/t_panic.elf
 	$(OBJCPY) -O binary $< $@
 
 $(BUILD)/free.o: bin/free.c bin/os.h | $(BUILD)

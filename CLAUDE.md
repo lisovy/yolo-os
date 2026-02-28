@@ -168,12 +168,12 @@ Stored in `/bin` on FAT16 **without** `.bin` extension.
 | bin/xxd.c        | xxd        | hexdump: `xxd <file>`                                 |
 | bin/vi.c         | vi         | vi-like text editor: `vi <file>`                      |
 | bin/demo.c       | demo       | VGA Mode 13h snow animation: `demo`; q to quit        |
-| bin/segfault.c   | segfault   | writes to kernel address 0x1000 → triggers segfault   |
+| bin/t_segflt.c   | t_segflt   | writes to kernel address 0x1000 → triggers segfault   |
 | bin/ls.c         | ls         | list directory contents                               |
 | bin/rm.c         | rm         | remove file or empty directory (prompts y/N)          |
 | bin/mkdir.c      | mkdir      | create directory                                      |
 | bin/mv.c         | mv         | rename file or directory                              |
-| bin/panic.c      | panic      | trigger kernel panic with optional message            |
+| bin/t_panic.c    | t_panic    | trigger kernel panic with optional message            |
 | bin/free.c       | free       | show physical and virtual memory usage in kB          |
 
 ## Source layout
@@ -198,12 +198,12 @@ bin/hello.c            hello world
 bin/xxd.c              hexdump utility
 bin/vi.c               vi-like text editor
 bin/demo.c             VGA Mode 13h snow + animation demo
-bin/segfault.c         deliberate kernel-memory access for segfault testing
+bin/t_segflt.c         deliberate kernel-memory access for segfault testing
 bin/ls.c               list directory contents
 bin/rm.c               remove file or empty directory
 bin/mkdir.c            create directory
 bin/mv.c               rename file or directory
-bin/panic.c            trigger kernel panic via SYS_PANIC syscall
+bin/t_panic.c          trigger kernel panic via SYS_PANIC syscall
 bin/free.c             physical + virtual memory usage (SYS_MEMINFO)
 scripts/patch_boot.sh  splices boot code with BPB from mkfs.fat into sector 0
 Makefile               build + run targets; KERNEL_SECTORS is the single size constant
@@ -232,11 +232,11 @@ sends commands over the serial port, and checks output with pexpect.
 | xxd               | `xxd BOOT.TXT` prints hex dump starting "00000000:"              |
 | xxd_missing_file  | `xxd NOSUCHFILE.TXT` prints "cannot open"                        |
 | vi_quit           | `vi test.txt` + `:q!` returns to shell                           |
-| segfault          | `segfault` prints "Segmentation fault", returns to shell         |
+| t_segflt          | `t_segflt` prints "Segmentation fault", returns to shell         |
 | fs_operations     | mkdir / vi (create file) / rm file / cd .. / rm dir             |
 | paths             | absolute paths: `xxd /bin/hello`, `cd /bin`, `vi /dir/file`, `xxd`/`rm` via full paths |
 | free              | Phys/Virt rows, total=130048 kB (32512×4), kB units, (2 procs)  |
-| panic             | `panic` prints `[PANIC]` on serial, system halts (run last)      |
+| t_panic           | `t_panic` prints `[PANIC]` on serial, system halts (run last)    |
 
 ## QEMU invocation
 ```bash
