@@ -946,7 +946,7 @@ static void paging_init(void)
     for (i = 0; i < 1024; i++)
         page_dir[i] = 0;
 
-    page_dir[0] = (unsigned int)pt_kernel | 0x03;   /* kernel: supervisor */
+    page_dir[0] = (unsigned int)pt_kernel | 0x07;   /* U=1 in PDE; individual PTEs enforce S/U */
     page_dir[1] = (unsigned int)pt_user   | 0x07;   /* user:   user-accessible */
 
     /* Load CR3 and enable paging in CR0 */
