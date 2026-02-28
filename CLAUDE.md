@@ -168,13 +168,22 @@ Stored in `/bin` on FAT16 **without** `.bin` extension.
 | bin/xxd.c        | xxd        | hexdump: `xxd <file>`                                 |
 | bin/vi.c         | vi         | vi-like text editor: `vi <file>`                      |
 | bin/demo.c       | demo       | VGA Mode 13h snow animation: `demo`; q to quit        |
-| bin/t_segflt.c   | t_segflt   | writes to kernel address 0x1000 → triggers segfault   |
 | bin/ls.c         | ls         | list directory contents                               |
 | bin/rm.c         | rm         | remove file or empty directory (prompts y/N)          |
 | bin/mkdir.c      | mkdir      | create directory                                      |
 | bin/mv.c         | mv         | rename file or directory                              |
-| bin/t_panic.c    | t_panic    | trigger kernel panic with optional message            |
 | bin/free.c       | free       | show physical and virtual memory usage in kB          |
+
+## Test programs (bin/)
+Programs with a `t_` prefix are used exclusively by the automated test suite.
+They are installed in `/bin` but are not intended as interactive user utilities.
+
+| File             | /bin name  | Description                                           |
+|------------------|------------|-------------------------------------------------------|
+| bin/t_segflt.c   | t_segflt   | writes to kernel address 0x1000 → triggers segfault   |
+| bin/t_panic.c    | t_panic    | trigger kernel panic with optional message            |
+| bin/t_mall1.c    | t_mall1    | malloc: alloc/write/free+reuse/large alloc/exhaustion |
+| bin/t_mall2.c    | t_mall2    | malloc: overflow past 4 KB allocation → segfault      |
 
 ## Source layout
 ```
@@ -198,13 +207,15 @@ bin/hello.c            hello world
 bin/xxd.c              hexdump utility
 bin/vi.c               vi-like text editor
 bin/demo.c             VGA Mode 13h snow + animation demo
-bin/t_segflt.c         deliberate kernel-memory access for segfault testing
 bin/ls.c               list directory contents
 bin/rm.c               remove file or empty directory
 bin/mkdir.c            create directory
 bin/mv.c               rename file or directory
-bin/t_panic.c          trigger kernel panic via SYS_PANIC syscall
 bin/free.c             physical + virtual memory usage (SYS_MEMINFO)
+bin/t_segflt.c         [test] deliberate kernel-memory access → segfault
+bin/t_panic.c          [test] trigger kernel panic via SYS_PANIC syscall
+bin/t_mall1.c          [test] malloc alloc/write/free/exhaustion
+bin/t_mall2.c          [test] malloc 4 KB alloc + overflow → segfault
 scripts/patch_boot.sh  splices boot code with BPB from mkfs.fat into sector 0
 Makefile               build + run targets; KERNEL_SECTORS is the single size constant
 tests/run_tests.py     automated test suite (pexpect + QEMU)
@@ -236,6 +247,8 @@ sends commands over the serial port, and checks output with pexpect.
 | fs_operations     | mkdir / vi (create file) / rm file / cd .. / rm dir             |
 | paths             | absolute paths: `xxd /bin/hello`, `cd /bin`, `vi /dir/file`, `xxd`/`rm` via full paths |
 | free              | Phys/Virt rows, total=130048 kB (32512×4), kB units, (2 procs)  |
+| t_mall1           | malloc alloc/write/free+reuse/large alloc/exhaustion → "malloc: OK" |
+| t_mall2           | malloc 4 KB alloc + overflow past boundary → segfault            |
 | t_panic           | `t_panic` prints `[PANIC]` on serial, system halts (run last)    |
 
 ## QEMU invocation

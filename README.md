@@ -176,12 +176,6 @@ Creates a subdirectory in the current directory.
 
 Renames a file or directory within the current directory. Usage: `mv <src> <dst>`
 
-### segfault
-
-Deliberately writes to a kernel-only address (`0x1000`) to trigger a page fault.
-The kernel prints "Segmentation fault" and returns to the shell.
-Useful for verifying that ring-3 memory protection works.
-
 ### free
 
 Displays physical and virtual memory usage in kB.
@@ -195,16 +189,19 @@ Virt:     8192 kB     568 kB     7624 kB   (2 procs)
 - **Phys**: PMM stats — total managed RAM (~127 MB), allocated frames, free frames
 - **Virt**: per-process virtual address space (4 MB each) × number of active processes; used = mapped pages
 
-### panic
+---
 
-Calls `kernel_panic()` with an optional message argument.
+## Test programs
 
-```
-> panic
-> panic something went wrong
-```
+Programs with a `t_` prefix are installed in `/bin` but are intended exclusively for the
+automated test suite (`make test`). They are not interactive user utilities.
 
-The screen turns red, the message is printed, and the CPU halts.
+| Program   | What it does |
+|-----------|--------------|
+| `t_segflt` | Writes to a supervisor-only address → page fault → "Segmentation fault" |
+| `t_panic`  | Calls `kernel_panic()` with an optional message → red panic screen + halt |
+| `t_mall1`  | Tests `malloc`: alloc, write, free+reuse, large alloc, exhaustion |
+| `t_mall2`  | Allocates 4 KB with `malloc`, writes within bounds, then overflows → segfault |
 
 ---
 
@@ -415,11 +412,13 @@ Direct x86 I/O port access. Available from ring 3 because the kernel sets `IOPL=
 | xxd | `xxd BOOT.TXT` prints a hex dump |
 | xxd_missing_file | `xxd NOSUCHFILE.TXT` prints "cannot open" |
 | vi_quit | `vi test.txt` + `:q!` returns to shell |
-| segfault | `segfault` prints "Segmentation fault" and returns to shell |
+| t_segflt | `t_segflt` prints "Segmentation fault" and returns to shell |
 | fs_operations | `mkdir`, create file via `vi`, `rm` file, `rm` dir |
 | paths | absolute paths: `xxd /bin/hello`, `cd /bin`, `vi /dir/file`, `xxd`/`rm` via full paths |
 | free | Phys/Virt rows present, total=130048 kB, kB units, (2 procs) |
-| panic | `panic` prints `[PANIC]` on serial and halts the system (run last) |
+| t_mall1 | malloc alloc/write/free+reuse/large alloc/exhaustion → "malloc: OK" |
+| t_mall2 | malloc 4 KB alloc + overflow past boundary → segfault |
+| t_panic | `t_panic` prints `[PANIC]` on serial and halts the system (run last) |
 
 ---
 
