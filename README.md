@@ -34,6 +34,8 @@ make test
 
 ## Disk layout
 
+![disk layout](docs/disk-layout.png)
+
 The single `disk.img` (4 MB raw) holds both the kernel and the filesystem:
 
 | Region | Content |
@@ -47,6 +49,8 @@ User programs and persistent data (`BOOT.TXT`) live in the FAT16 partition.
 ---
 
 ## Memory layout
+
+![memory layout](docs/memory-layout.png)
 
 | Address | Content | Ring |
 |---------|---------|------|
