@@ -242,6 +242,32 @@ def test_paths(child: pexpect.spawn):
     return True, 'xxd /bin/hello, cd /bin, vi /dir/file, xxd/rm via paths all work'
 
 
+def test_free(child: pexpect.spawn):
+    """free reports physical and virtual memory statistics."""
+    child.sendline('free')
+    try:
+        child.expect(PROMPT, timeout=TIMEOUT_CMD)
+    except pexpect.TIMEOUT:
+        return False, 'free did not return to shell'
+
+    out = child.before
+
+    if 'Phys:' not in out:
+        return False, 'Phys: line missing'
+    if 'Virt:' not in out:
+        return False, 'Virt: line missing'
+    # PMM manages 0x100000–0x7FFFFFF = 32512 frames × 4 kB = 130048 kB
+    if '130048' not in out:
+        return False, 'expected phys total 130048 kB not found'
+    if 'kB' not in out:
+        return False, 'kB unit missing'
+    # Exactly two processes are active: shell + free
+    if '(2 procs)' not in out:
+        return False, '(2 procs) not found — expected shell + free'
+
+    return True, 'Phys/Virt rows present, total=130048 kB, kB units, (2 procs)'
+
+
 def test_panic(child: pexpect.spawn):
     """panic utility triggers kernel panic; [PANIC] message appears on serial."""
     child.sendline('panic kernel panic test')
@@ -343,6 +369,7 @@ TESTS = [
     ('segfault',          test_segfault),
     ('fs_operations',     test_fs_operations),
     ('paths',             test_paths),
+    ('free',              test_free),
     ('panic',             test_panic),   # must be last — halts the system
 ]
 
