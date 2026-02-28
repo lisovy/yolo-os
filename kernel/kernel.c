@@ -671,6 +671,7 @@ static void panic_screen(const char *msg, struct registers *r)
 #define SYS_GETPOS  15   /* ()             → row*256 + col             */
 #define SYS_PANIC   16   /* (msg_ptr)      → does not return           */
 #define SYS_MEMINFO 17   /* (meminfo_ptr)  → 0                         */
+#define SYS_SBRK    18   /* (n)            → old_break or -1           */
 
 struct meminfo {
     unsigned int phys_total_kb;
@@ -814,6 +815,8 @@ static unsigned int g_exit_code;   /* set by SYS_EXIT, returned by SYS_EXEC */
 #define ARGS_BASE      0x7FC000
 #define ARGS_MAX       200
 #define USER_STACK_TOP 0x7FF000
+#define HEAP_BASE      0x440000   /* first heap page (VPN 64, right after binary) */
+#define HEAP_MAX       0x7F8000   /* heap limit: VPN 1015, stays clear of stack   */
 
 extern void         exec_run(unsigned int entry, unsigned int user_stack_top);
 extern int            fat16_listdir(void (*cb)(const char *name, unsigned int size, int is_dir));
@@ -841,7 +844,7 @@ static unsigned int pt_kernel[1024]  __attribute__((aligned(4096)));  /* 0–4 M
  * ============================================================ */
 
 #define PROC_MAX_PROCS  32
-#define PROC_MAX_FRAMES 80   /* 1 PD + 1 PT + 64 bin + 7 stack + 1 kstack = 74 + margin */
+#define PROC_MAX_FRAMES  2   /* phys_frames[0]=PD, phys_frames[1]=PT; user pages freed via PT scan */
 
 typedef enum { PROC_UNUSED=0, PROC_RUNNING, PROC_READY, PROC_ZOMBIE } proc_state_t;
 
@@ -852,8 +855,10 @@ struct process {
     unsigned int   cr3;                        /* physical address of page directory */
     unsigned int   parent_cr3;                 /* physical address of parent page dir */
 
-    unsigned int   phys_frames[PROC_MAX_FRAMES];
+    unsigned int   phys_frames[PROC_MAX_FRAMES]; /* [0]=PD, [1]=user PT              */
     int            n_frames;
+
+    unsigned int   heap_break;                 /* current heap break (sbrk)           */
 
     unsigned int   saved_exec_ret_esp;         /* exec_ret_esp of parent */
 
@@ -867,20 +872,19 @@ struct process {
 static struct process  g_procs[PROC_MAX_PROCS];
 static struct process *g_current = 0;
 
-static void proc_track_frame(struct process *p, unsigned int pa)
-{
-    if (p->n_frames < PROC_MAX_FRAMES)
-        p->phys_frames[p->n_frames++] = pa;
-}
-
 /*
  * process_create — build a per-process page directory and load the binary.
  * Must be called while CR3 = page_dir (kernel identity map).
  *
  * Virtual layout in PDE[1] (base 0x400000):
- *   VPN   0..63   binary  (64 × 4 KB = 256 KB)
- *   VPN 1016..1022 stack  (7 × 4 KB = 28 KB)
+ *   VPN   0..63    binary  (64 × 4 KB = 256 KB)
+ *   VPN  64..1015  heap    (unmapped initially, mapped on demand by SYS_SBRK)
+ *   VPN 1016..1022 stack   (7 × 4 KB = 28 KB)
  *   VPN 1020       ARGS_BASE = 0x7FC000  (stack_frames[4])
+ *
+ * Only phys_frames[0]=PD and phys_frames[1]=PT are tracked here.
+ * All user pages (binary, stack, heap) are freed by scanning the PT
+ * in process_destroy().
  */
 static struct process *process_create(const char *name, const char *args)
 {
@@ -891,68 +895,69 @@ static struct process *process_create(const char *name, const char *args)
     if (slot < 0) return 0;
 
     struct process *p = &g_procs[slot];
-    p->n_frames = 0;
-    p->pid      = slot + 1;
+    p->n_frames    = 0;
+    p->pid         = slot + 1;
+    p->heap_break  = HEAP_BASE;
+    p->phys_kstack = 0;
 
-    /* Allocate page directory frame */
+    /* Declare pt early so the fail: block can reference it safely */
+    unsigned int *pt = (unsigned int *)0;
+
+    /* [1] Allocate page directory */
     unsigned int pd_phys = pmm_alloc();
     if (!pd_phys) return 0;
-    proc_track_frame(p, pd_phys);
-    p->cr3 = pd_phys;
+    p->phys_frames[0] = pd_phys;
+    p->n_frames       = 1;
+    p->cr3            = pd_phys;
 
-    /* Allocate user page table frame */
+    /* [2] Allocate user page table; clear it immediately */
     unsigned int pt_phys = pmm_alloc();
     if (!pt_phys) goto fail;
-    proc_track_frame(p, pt_phys);
-
-    /* Allocate 64 contiguous frames for the binary (256 KB) */
-    unsigned int bin_phys = pmm_alloc_contiguous(64);
-    if (!bin_phys) goto fail;
-    for (i = 0; i < 64; i++) proc_track_frame(p, bin_phys + (unsigned int)i * 0x1000);
-
-    /* Allocate 7 frames for user stack (VPN 1016..1022) */
-    unsigned int stack_frames[7];
-    for (i = 0; i < 7; i++) {
-        stack_frames[i] = pmm_alloc();
-        if (!stack_frames[i]) goto fail;
-        proc_track_frame(p, stack_frames[i]);
-    }
-    /* VPN 1020 = ARGS_BASE: stack_frames[4] (1020 - 1016 = 4) */
-    unsigned int args_phys = stack_frames[4];
-
-    /* Allocate kernel stack frame */
-    unsigned int kstack_phys = pmm_alloc();
-    if (!kstack_phys) goto fail;
-    proc_track_frame(p, kstack_phys);
-    p->phys_kstack = kstack_phys;
-
-    /* Load binary (identity-mapped at bin_phys in kernel page_dir) */
-    int n = fat16_read_from_bin(name, (unsigned char *)bin_phys, PROG_MAX_SIZE);
-    if (n <= 0) goto fail;
-
-    /* Copy args to args page (identity-mapped) */
-    char *dst = (char *)args_phys;
-    for (i = 0; i < ARGS_MAX - 1 && args[i]; i++) dst[i] = args[i];
-    dst[i] = '\0';
-
-    /* Build user page table */
-    unsigned int *pt = (unsigned int *)pt_phys;
+    p->phys_frames[1] = pt_phys;
+    p->n_frames       = 2;
+    pt                = (unsigned int *)pt_phys;
     for (i = 0; i < 1024; i++) pt[i] = 0;
 
+    /* [3] Allocate kernel stack */
+    unsigned int kstack_phys = pmm_alloc();
+    if (!kstack_phys) goto fail;
+    p->phys_kstack = kstack_phys;
+
+    /* [4] Allocate 64 contiguous frames for binary (VPN 0–63) */
+    unsigned int bin_phys = pmm_alloc_contiguous(64);
+    if (!bin_phys) goto fail;
     for (i = 0; i < 64; i++)
         pt[i] = (bin_phys + (unsigned int)i * 0x1000) | 0x07;  /* P+RW+U */
 
-    for (i = 0; i < 7; i++)
-        pt[1016 + i] = stack_frames[i] | 0x07;  /* P+RW+U */
+    /* [5] Allocate 7 frames for stack+args (VPN 1016–1022) */
+    for (i = 0; i < 7; i++) {
+        unsigned int f = pmm_alloc();
+        if (!f) goto fail;
+        pt[1016 + i] = f | 0x07;                                /* P+RW+U */
+    }
+    /* VPN 1020 = ARGS_BASE = stack frame 4 (1020 - 1016) */
 
-    /* Build page directory */
+    /* [6] Load binary into physical frames (identity-mapped in kernel page_dir).
+     * Zero-fill bytes [n..PROG_MAX_SIZE) so the .bss section is properly zeroed
+     * (physical frames may carry stale data from previous processes). */
+    int n = fat16_read_from_bin(name, (unsigned char *)bin_phys, PROG_MAX_SIZE);
+    if (n <= 0) goto fail;
+    {
+        unsigned char *base = (unsigned char *)bin_phys;
+        for (i = n; i < PROG_MAX_SIZE; i++) base[i] = 0;
+    }
+
+    /* [7] Copy args into the args page (identity-mapped) */
+    char *dst = (char *)(pt[1020] & ~0xFFFu);
+    for (i = 0; i < ARGS_MAX - 1 && args[i]; i++) dst[i] = args[i];
+    dst[i] = '\0';
+
+    /* [8] Build page directory */
     unsigned int *pd = (unsigned int *)pd_phys;
     for (i = 0; i < 1024; i++) pd[i] = 0;
-
-    pd[0] = (unsigned int)pt_kernel | 0x07;  /* shared kernel PT */
-    pd[1] = pt_phys | 0x07;                  /* user PT */
-
-    /* PDE[2]–PDE[511]: 4 MB PSE supervisor-only identity for kernel writes */
+    pd[0] = (unsigned int)pt_kernel | 0x07;   /* shared kernel PT, 0–4 MB */
+    pd[1] = pt_phys | 0x07;                   /* user PT                   */
+    /* PDE[2]–PDE[511]: 4 MB PSE supervisor-only identity (kernel write access) */
     for (i = 2; i < 512; i++)
         pd[i] = (unsigned int)(i << 22) | 0x83;  /* P+RW+PS, U=0 */
 
@@ -960,18 +965,38 @@ static struct process *process_create(const char *name, const char *args)
     return p;
 
 fail:
-    for (i = 0; i < p->n_frames; i++) pmm_free(p->phys_frames[i]);
-    p->n_frames = 0;
-    p->state    = PROC_UNUSED;
+    /* Free any user pages already mapped in the PT */
+    if (p->n_frames >= 2) {
+        for (i = 0; i < 1024; i++)
+            if (pt[i] & 0x01) pmm_free(pt[i] & ~0xFFFu);
+        pmm_free(p->phys_frames[1]);         /* PT itself */
+    }
+    if (p->n_frames >= 1) pmm_free(p->phys_frames[0]);  /* PD */
+    if (p->phys_kstack)   pmm_free(p->phys_kstack);
+    p->n_frames    = 0;
+    p->phys_kstack = 0;
+    p->state       = PROC_UNUSED;
     return 0;
 }
 
+/*
+ * process_destroy — release all physical memory owned by process p.
+ * Scans the user PT to find and free all mapped user pages (binary, stack,
+ * heap), then frees the PT, PD, and kernel stack.
+ * Must be called while CR3 = page_dir (kernel identity map).
+ */
 static void process_destroy(struct process *p)
 {
-    int i;
-    for (i = 0; i < p->n_frames; i++) pmm_free(p->phys_frames[i]);
-    p->n_frames = 0;
-    p->state    = PROC_UNUSED;
+    int vpn;
+    unsigned int *pt = (unsigned int *)p->phys_frames[1];
+    for (vpn = 0; vpn < 1024; vpn++)
+        if (pt[vpn] & 0x01) pmm_free(pt[vpn] & ~0xFFFu);
+    pmm_free(p->phys_frames[0]);   /* PD          */
+    pmm_free(p->phys_frames[1]);   /* PT          */
+    if (p->phys_kstack) pmm_free(p->phys_kstack);
+    p->n_frames    = 0;
+    p->phys_kstack = 0;
+    p->state       = PROC_UNUSED;
 }
 
 /* Directory listing buffer used by SYS_READDIR */
@@ -1119,6 +1144,43 @@ static void syscall_dispatch(struct registers *r)
         r->eax = 0;
         break;
     }
+    case SYS_SBRK: {
+        /*
+         * sbrk(n): map n more bytes of heap, return old break, or -1 on failure.
+         * Heap lives at HEAP_BASE..HEAP_MAX-1 (VPN 64..1015 in the user PT).
+         * Switch to kernel page_dir so we can safely write to the process PT
+         * regardless of where the PT frame sits in physical memory.
+         */
+        int sbrk_n = (int)r->ebx;
+        if (sbrk_n == 0) { r->eax = g_current->heap_break; break; }
+        if (sbrk_n < 0 || (unsigned int)sbrk_n > HEAP_MAX - g_current->heap_break) {
+            r->eax = (unsigned int)-1; break;
+        }
+        unsigned int old_brk = g_current->heap_break;
+        unsigned int new_brk = old_brk + (unsigned int)sbrk_n;
+
+        /* Switch to kernel page_dir for safe PT access */
+        __asm__ volatile("mov %0, %%cr3" :: "r"(page_dir) : "memory");
+
+        unsigned int *sbrk_pt = (unsigned int *)g_current->phys_frames[1];
+        unsigned int va;
+        int oom = 0;
+        for (va = old_brk & ~0xFFFu; va < new_brk; va += 0x1000) {
+            unsigned int vpn = (va - PROG_BASE) / 0x1000;
+            if (sbrk_pt[vpn] & 0x01) continue;   /* already mapped */
+            unsigned int pa = pmm_alloc();
+            if (!pa) { oom = 1; break; }
+            sbrk_pt[vpn] = pa | 0x07;             /* P+RW+U */
+        }
+
+        /* Switch back to process page_dir (TLB flush picks up new mappings) */
+        __asm__ volatile("mov %0, %%cr3" :: "r"(g_current->cr3) : "memory");
+
+        if (oom) { r->eax = (unsigned int)-1; break; }
+        g_current->heap_break = new_brk;
+        r->eax = old_brk;
+        break;
+    }
     case SYS_EXEC: {
         char name[13], args[ARGS_MAX];
         int xi;
@@ -1227,7 +1289,6 @@ void isr_handler(struct registers *r)
         /* Page fault from user space: deliver segfault and return to shell */
         if (r->int_no == 14 && (r->err_code & 0x04) && exec_ret_esp != 0) {
             vga_print("\nSegmentation fault\n", COLOR_DEFAULT);
-            serial_print("[exec] Segmentation fault\n");
             g_exit_code = 139;
             /* Restore kernel stack saved by exec_run() and return to
              * program_exec() via exec_run_return label.

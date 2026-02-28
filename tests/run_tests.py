@@ -268,6 +268,28 @@ def test_free(child: pexpect.spawn):
     return True, 'Phys/Virt rows present, total=130048 kB, kB units, (2 procs)'
 
 
+def test_malloc(child: pexpect.spawn):
+    """malloc_test: alloc, write, free+reuse, large alloc, over-limit → NULL."""
+    child.sendline('malltest')
+    try:
+        child.expect('malloc: OK', timeout=20)
+        wait_prompt(child)
+        return True, 'alloc, free+reuse, large alloc, exhaustion all passed'
+    except pexpect.TIMEOUT:
+        return False, 'malloc_test did not print "malloc: OK"'
+
+
+def test_malloc_oob(child: pexpect.spawn):
+    """malloc_oob: accessing unmapped heap causes segfault."""
+    child.sendline('malloob')
+    try:
+        child.expect('Segmentation fault', timeout=TIMEOUT_CMD)
+        wait_prompt(child)
+        return True, 'unmapped heap access caused segfault'
+    except pexpect.TIMEOUT:
+        return False, 'no segfault for unmapped heap access'
+
+
 def test_panic(child: pexpect.spawn):
     """panic utility triggers kernel panic; [PANIC] message appears on serial."""
     child.sendline('panic kernel panic test')
@@ -370,6 +392,8 @@ TESTS = [
     ('fs_operations',     test_fs_operations),
     ('paths',             test_paths),
     ('free',              test_free),
+    ('malltest',          test_malloc),
+    ('malloob',           test_malloc_oob),
     ('panic',             test_panic),   # must be last — halts the system
 ]
 

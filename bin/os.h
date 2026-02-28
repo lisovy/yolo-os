@@ -39,6 +39,7 @@
 #define SYS_GETPOS  15
 #define SYS_PANIC   16
 #define SYS_MEMINFO 17
+#define SYS_SBRK    18
 
 struct direntry { char name[13]; unsigned int size; int is_dir; };
 
@@ -59,7 +60,8 @@ struct meminfo {
 #define KEY_RIGHT 0x83
 
 /* Program argument string — written by kernel before exec_run() */
-#define ARGS_BASE 0x7FC000
+#define ARGS_BASE  0x7FC000
+#define HEAP_BASE  0x440000   /* first heap virtual address (right after binary) */
 static inline const char *get_args(void) { return (const char *)ARGS_BASE; }
 
 /* Raw syscall — up to 3 arguments */
@@ -73,6 +75,12 @@ static inline int syscall(int num, int a, int b, int c)
         : "memory"
     );
     return ret;
+}
+
+/* Extend heap by n bytes; returns old break address, or (void*)-1 on failure */
+static inline void *sbrk(unsigned int n)
+{
+    return (void *)syscall(SYS_SBRK, (int)n, 0, 0);
 }
 
 static inline void exit(int code)

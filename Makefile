@@ -38,7 +38,8 @@ KOBJS := $(BUILD)/entry.o $(BUILD)/isr.o $(BUILD)/idt.o \
 USER_BINS := $(BUILD)/sh.bin $(BUILD)/hello.bin $(BUILD)/xxd.bin $(BUILD)/vi.bin \
              $(BUILD)/demo.bin $(BUILD)/segfault.bin \
              $(BUILD)/ls.bin $(BUILD)/rm.bin $(BUILD)/mkdir.bin $(BUILD)/mv.bin \
-             $(BUILD)/panic.bin $(BUILD)/free.bin
+             $(BUILD)/panic.bin $(BUILD)/free.bin \
+             $(BUILD)/malltest.bin $(BUILD)/malloob.bin
 
 # ======================================================================
 .PHONY: all run clean newdisk test
@@ -156,6 +157,24 @@ $(BUILD)/free.elf: $(BUILD)/free.o bin/user.ld
 	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
 
 $(BUILD)/free.bin: $(BUILD)/free.elf
+	$(OBJCPY) -O binary $< $@
+
+$(BUILD)/malltest.o: bin/malltest.c bin/os.h bin/malloc.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/malltest.elf: $(BUILD)/malltest.o bin/user.ld
+	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
+
+$(BUILD)/malltest.bin: $(BUILD)/malltest.elf
+	$(OBJCPY) -O binary $< $@
+
+$(BUILD)/malloob.o: bin/malloob.c bin/os.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/malloob.elf: $(BUILD)/malloob.o bin/user.ld
+	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
+
+$(BUILD)/malloob.bin: $(BUILD)/malloob.elf
 	$(OBJCPY) -O binary $< $@
 
 # --- Bootloader -------------------------------------------------------
