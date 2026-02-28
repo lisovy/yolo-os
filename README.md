@@ -21,16 +21,32 @@ make test
 
 ## Architecture
 
-- **CPU**: 32-bit protected mode; kernel in ring 0, user programs in ring 3
-- **Paging**: PMM bitmap allocator hands out physical frames per process; per-process page
-  directories with PSE large pages for kernel identity access; U/S bits enforce ring separation;
-  segfaults caught; unlimited process nesting depth
+- **CPU**: x86, 32-bit protected mode; kernel in ring 0, user programs in ring 3
 - **Boot**: 16-bit MBR bootloader → ATA PIO LBA read → jumps to 32-bit kernel at `0x10000`
 - **Video**: VGA text mode 80×25 (`0xB8000`); user programs may switch to Mode 13h graphics
 - **Keyboard**: PS/2 polling, scan code set 1, US QWERTY, arrow keys supported
-- **Filesystem**: FAT16 on the same IDE disk image, read/write via ATA PIO
-- **Syscalls**: `int 0x80` (EAX=number, EBX/ECX/EDX=args, return in EAX)
-- **Programs**: flat 32-bit binaries stored in `/bin` on FAT16, loaded into RAM at `0x400000`, run in ring 3
+- **Filesystem**: FAT16 on the same IDE disk image, read/write via ATA PIO; supports
+  absolute and relative paths, subdirectories, create/delete/rename
+- **Syscalls**: 18 syscalls via `int 0x80` — EAX = number, EBX/ECX/EDX = arguments,
+  return value in EAX. Cover I/O (`read`/`write`), file access (`open`/`close`),
+  directory ops (`readdir`/`mkdir`/`unlink`/`rename`/`chdir`), process management
+  (`exec`/`exit`), memory (`sbrk`), and hardware helpers (`setpos`/`clrscr`/`getchar`).
+- **Programs**: freestanding flat 32-bit binaries linked at `0x400000`, stored in `/bin` on
+  FAT16 without extension. Include `bin/os.h` for all syscall wrappers — no libc needed.
+- **Physical memory (PMM)**: bitmap allocator manages ~127 MB (0x100000–0x7FFFFFFF,
+  32 512 frames of 4 KB). Each process receives its own set of frames: page directory,
+  page table, 256 KB binary area, 28 KB stack, 4 KB kernel stack (~300 KB total).
+  Up to ~430 processes can exist simultaneously.
+- **Virtual memory / paging**: every process has its own page directory (CR3). The kernel
+  is mapped supervisor-only in PDE[0] (shared `pt_kernel`); the user binary occupies PDE[1]
+  (per-process page table, ring 3). PDE[2–511] use 4 MB PSE large pages to give the kernel
+  identity access to all physical RAM without per-process kernel mappings. U/S bits enforce
+  ring separation; a ring-3 page fault (segfault) is caught, reported, and the process is
+  terminated cleanly. Process nesting depth is unlimited.
+- **Heap / malloc**: user programs can grow their heap via the `sbrk` syscall
+  (virtual 0x440000–0x7F7FFF, mapped on demand in 4 KB pages). `bin/malloc.h` provides a
+  portable first-fit free-list allocator on top of `sbrk` — include it in any user program,
+  no kernel changes required.
 
 ---
 
