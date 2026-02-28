@@ -96,7 +96,7 @@ def test_hello(child: pexpect.spawn):
 def test_ls(child: pexpect.spawn):
     """ls lists the expected binaries."""
     child.sendline('ls')
-    expected = ['hello.bin', 'xxd.bin', 'vi.bin', 'demo.bin']
+    expected = ['hello.bin', 'xxd.bin', 'vi.bin', 'demo.bin', 'segfault.bin']
     try:
         # Collect output until next prompt
         child.expect(PROMPT, timeout=TIMEOUT_CMD)
@@ -153,6 +153,17 @@ def test_vi_quit(child: pexpect.spawn):
         return False, 'did not return to shell after :q!'
 
 
+def test_segfault(child: pexpect.spawn):
+    """run segfault accesses kernel memory and is killed with 'Segmentation fault'."""
+    child.sendline('run segfault')
+    try:
+        child.expect('Segmentation fault', timeout=TIMEOUT_CMD)
+        wait_prompt(child)
+        return True, 'printed "Segmentation fault" and returned to shell'
+    except pexpect.TIMEOUT:
+        return False, 'no "Segmentation fault" message'
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 TESTS = [
@@ -163,6 +174,7 @@ TESTS = [
     ('xxd',               test_xxd),
     ('xxd_missing_file',  test_xxd_missing_file),
     ('vi_quit',           test_vi_quit),
+    ('segfault',          test_segfault),
 ]
 
 # ── main ───────────────────────────────────────────────────────────────────────
