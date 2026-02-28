@@ -160,37 +160,93 @@ Use `get_args()` to read the argument string passed after the program name.
 
 ## Syscall reference
 
-All syscalls use `int 0x80`: `EAX` = syscall number, `EBX`/`ECX`/`EDX` = args, return value in `EAX`.
-Include `bin/os.h` for the C wrappers below.
+Include `bin/os.h`. All functions are `static inline` wrappers around `int 0x80`.
 
-| Function | Description |
-|----------|-------------|
-| `exit(code)` | Terminate the program. `code` is printed by the shell as "exited N". |
-| `write(fd, buf, len)` → bytes | Write `len` bytes from `buf` to `fd`. `fd=1` = stdout (VGA + serial). For open files (`fd≥2`) data is buffered until `close()`. Returns bytes written or -1. |
-| `read(fd, buf, len)` → bytes | Read up to `len` bytes into `buf`. `fd=0` = stdin (keyboard, line-buffered, echoed). For open files reads from current position. Returns bytes read or -1. |
-| `open(path, flags)` → fd | Open a FAT16 file in the cwd. `flags`: `O_RDONLY=0` reads file into memory; `O_WRONLY=1` creates/truncates for writing. Returns fd (≥2) or -1. |
-| `close(fd)` → 0/-1 | Close fd. For `O_WRONLY` files flushes the buffer to disk. |
-| `get_char()` → char | Blocking read of one raw keystroke (no echo). Arrow keys return `KEY_UP/DOWN/LEFT/RIGHT` (0x80–0x83). |
-| `get_char_nonblock()` → char/0 | Non-blocking version of `get_char`; returns 0 immediately if no key is ready. |
-| `set_pos(row, col)` | Move the VGA hardware cursor to `row` (0–24), `col` (0–79). |
-| `clrscr()` | Clear the entire text screen and move cursor to (0, 0). |
-| `outb(port, val)` | Write byte `val` to I/O port `port`. Available because IOPL=3 in ring 3. |
-| `inb(port)` → byte | Read one byte from I/O port `port`. |
-
-File descriptors: `0` = stdin, `1` = stdout, `2`–`5` = FAT16 files (max 4 open, 16 KB buffer each).
+---
 
 ```c
-// Quick usage example (from bin/os.h)
-int fd = open("data.txt", O_RDONLY);
-char buf[64];
-int n = read(fd, buf, sizeof(buf));
-close(fd);
-
-fd = open("out.txt", O_WRONLY);
-write(fd, buf, n);
-close(fd);   // flushes to disk
-exit(0);
+void exit(int code);
 ```
+Terminate the program. `code` is displayed by the shell as `exited N`.
+
+---
+
+```c
+int write(int fd, const char *buf, int len);
+```
+Write `len` bytes from `buf` to `fd`. Returns number of bytes written, or `-1` on error.
+- `fd=1` — stdout: output appears on VGA and COM1 serial
+- `fd≥2` — open file: data is accumulated in a 16 KB kernel buffer, flushed to disk on `close()`
+
+---
+
+```c
+int read(int fd, char *buf, int len);
+```
+Read up to `len` bytes into `buf`. Returns number of bytes read, or `-1` on error.
+- `fd=0` — stdin: blocks until newline; echoes typed characters; returns the whole line including `\n`
+- `fd≥2` — open file: reads sequentially from current position
+
+---
+
+```c
+int open(const char *path, int flags);
+```
+Open a file in the current directory. Returns a file descriptor (`≥2`), or `-1` if not found / on error.
+- `flags=O_RDONLY` (0) — read: file is loaded into a kernel buffer; subsequent `read()` calls return data from it
+- `flags=O_WRONLY` (1) — write: creates the file if it does not exist, truncates it if it does
+
+---
+
+```c
+int close(int fd);
+```
+Close `fd`. Returns `0` on success, `-1` on error.
+For `O_WRONLY` files: flushes the kernel buffer to FAT16 on disk.
+
+---
+
+```c
+int get_char(void);
+```
+Blocking read of one raw keystroke; no echo. Returns the character as an `unsigned char` value.
+Arrow keys return the following constants (defined in `os.h`):
+
+| Constant | Value |
+|----------|-------|
+| `KEY_UP` | `0x80` |
+| `KEY_DOWN` | `0x81` |
+| `KEY_LEFT` | `0x82` |
+| `KEY_RIGHT` | `0x83` |
+
+---
+
+```c
+int get_char_nonblock(void);
+```
+Non-blocking variant of `get_char`. Returns `0` immediately if no key is available.
+
+---
+
+```c
+void set_pos(int row, int col);
+```
+Move the VGA hardware cursor. `row`: 0–24, `col`: 0–79.
+
+---
+
+```c
+void clrscr(void);
+```
+Clear the entire text screen and move the cursor to (0, 0).
+
+---
+
+```c
+void outb(unsigned short port, unsigned char val);
+unsigned char inb(unsigned short port);
+```
+Direct x86 I/O port access. Available from ring 3 because the kernel sets `IOPL=3` in `EFLAGS`.
 
 ---
 
