@@ -782,3 +782,18 @@ int fat16_chdir(const char *name)
     }
     return -1;
 }
+
+/* ============================================================
+ * fat16_read_from_root — like fat16_read but always searches the
+ * root directory, regardless of cwd.  Used by the program loader
+ * so that `run prog` works from any subdirectory.
+ * ============================================================ */
+
+int fat16_read_from_root(const char *filename, unsigned char *buf, unsigned int max_bytes)
+{
+    u16 saved = g_cwd_cluster;
+    g_cwd_cluster = 0;
+    int r = fat16_read(filename, buf, max_bytes);
+    g_cwd_cluster = saved;
+    return r;
+}

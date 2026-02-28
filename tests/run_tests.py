@@ -164,6 +164,82 @@ def test_segfault(child: pexpect.spawn):
         return False, 'no "Segmentation fault" message'
 
 
+def test_fs_operations(child: pexpect.spawn):
+    """mkdir, create file in subdir via vi, rm file, cd .., rm dir."""
+
+    # 1. Create directory
+    if not send_cmd(child, 'mkdir testdir'):
+        return False, 'mkdir did not return prompt'
+
+    # 2. ls should list testdir/
+    child.sendline('ls')
+    try:
+        child.expect('testdir/', timeout=TIMEOUT_CMD)
+        wait_prompt(child)
+    except pexpect.TIMEOUT:
+        return False, 'testdir/ not visible in ls after mkdir'
+
+    # 3. cd into testdir — prompt becomes /testdir>
+    if not send_cmd(child, 'cd testdir'):
+        return False, 'cd testdir failed'
+
+    # 4. Create a file via vi (programs are always loaded from root)
+    child.sendline('run vi testfile.txt')
+    try:
+        child.expect(pexpect.TIMEOUT, timeout=2)
+    except pexpect.TIMEOUT:
+        pass
+    child.send('i')           # enter insert mode
+    child.send('hello')       # type content
+    child.send('\x1b')        # ESC — back to normal mode
+    child.send(':wq\r')       # save and quit
+    if not wait_prompt(child):
+        return False, 'vi :wq did not return to prompt'
+
+    # 5. ls inside testdir should show the new file
+    child.sendline('ls')
+    try:
+        child.expect('testfile.txt', timeout=TIMEOUT_CMD)
+        wait_prompt(child)
+    except pexpect.TIMEOUT:
+        return False, 'testfile.txt not found in ls after vi :wq'
+
+    # 6. Delete the file (rm prompts [y/N])
+    child.sendline('rm testfile.txt')
+    try:
+        child.expect(r'\[y/N\]', timeout=TIMEOUT_CMD)
+    except pexpect.TIMEOUT:
+        return False, 'rm did not show [y/N] prompt'
+    child.send('y')
+    if not wait_prompt(child):
+        return False, 'rm testfile.txt failed'
+
+    # 7. Go back to root
+    if not send_cmd(child, 'cd ..'):
+        return False, 'cd .. failed'
+
+    # 8. Delete the now-empty directory
+    child.sendline('rm testdir')
+    try:
+        child.expect(r'\[y/N\]', timeout=TIMEOUT_CMD)
+    except pexpect.TIMEOUT:
+        return False, 'rm testdir did not show [y/N] prompt'
+    child.send('y')
+    if not wait_prompt(child):
+        return False, 'rm testdir failed'
+
+    # 9. ls at root should no longer show testdir
+    child.sendline('ls')
+    try:
+        child.expect(PROMPT, timeout=TIMEOUT_CMD)
+    except pexpect.TIMEOUT:
+        return False, 'ls timed out after rm testdir'
+    if 'testdir' in child.before:
+        return False, 'testdir still visible in ls after deletion'
+
+    return True, 'mkdir / create file / rm file / rm dir all succeeded'
+
+
 # ── test registry ──────────────────────────────────────────────────────────────
 
 TESTS = [
@@ -175,6 +251,7 @@ TESTS = [
     ('xxd_missing_file',  test_xxd_missing_file),
     ('vi_quit',           test_vi_quit),
     ('segfault',          test_segfault),
+    ('fs_operations',     test_fs_operations),
 ]
 
 # ── main ───────────────────────────────────────────────────────────────────────

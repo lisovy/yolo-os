@@ -893,6 +893,7 @@ extern int  fat16_delete(const char *name);
 extern int  fat16_mkdir(const char *name);
 extern int  fat16_rename(const char *src, const char *dst);
 extern int  fat16_chdir(const char *name);
+extern int  fat16_read_from_root(const char *filename, unsigned char *buf, unsigned int max_bytes);
 
 /* ============================================================
  * Kernel entry point
@@ -1097,7 +1098,7 @@ static void program_exec(const char *filename, const char *args)
     fname[fi++] = '.'; fname[fi++] = 'b'; fname[fi++] = 'i'; fname[fi++] = 'n';
     fname[fi] = '\0';
 
-    int n = fat16_read(fname, (unsigned char *)PROG_BASE, PROG_MAX_SIZE);
+    int n = fat16_read_from_root(fname, (unsigned char *)PROG_BASE, PROG_MAX_SIZE);
     if (n <= 0) {
         vga_print("exec: not found: ", COLOR_DEFAULT);
         vga_print(fname, COLOR_DEFAULT);
