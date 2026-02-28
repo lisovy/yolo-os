@@ -1,15 +1,29 @@
 /*
- * malloc_oob — accesses the heap area (HEAP_BASE = 0x440000) directly,
- * without calling malloc() first.  The page is not mapped, so this
- * triggers a page fault → "Segmentation fault" → returns to shell.
+ * malloc_oob — allocates a 4 KB buffer with malloc(), writes within bounds,
+ * then deliberately overflows past the allocation boundary until a page fault
+ * occurs → "Segmentation fault" → returns to shell.
  */
 
 #include "os.h"
+#include "malloc.h"
 
 void main(void)
 {
-    volatile char *p = (volatile char *)HEAP_BASE;
-    *p = 1;   /* page fault: heap not mapped without sbrk */
+    char *buf = (char *)malloc(4096);
+    if (!buf) {
+        print("ERROR: malloc returned NULL\n");
+        exit(1);
+    }
+
+    /* In-bounds writes: fill the entire 4 KB allocation */
+    unsigned int i;
+    for (i = 0; i < 4096; i++)
+        buf[i] = (char)i;
+
+    /* Overflow: write past the allocated 4 KB until a page fault fires */
+    for (;; i++)
+        buf[i] = (char)i;
+
     /* should never reach here */
     print("ERROR: expected segfault did not occur\n");
     exit(1);
