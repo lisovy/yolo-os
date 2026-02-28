@@ -1,8 +1,7 @@
-/* demo.c — VGA Mode 13h snow effect + PC speaker beeps for YOLO-OS
+/* demo.c — VGA Mode 13h snow effect for YOLO-OS
  *
  * Switches to 320x200 256-colour graphics mode and fills the
  * framebuffer with random black/white pixels ("TV snow").
- * PC speaker beeps twice per second (80 ms on, 170 ms off, repeat).
  * Press 'q' to quit.
  *
  * The kernel automatically restores text mode after exit
@@ -27,12 +26,8 @@
 #define VGA_GC_D    0x3CF
 #define VGA_AC      0x3C0
 #define VGA_INSTAT  0x3DA
-
-/* PC speaker / PIT */
-#define PIT_CH0     0x40   /* channel 0 data (read for timing)  */
-#define PIT_CH2     0x42   /* channel 2 data (write for tone)   */
-#define PIT_CMD     0x43   /* PIT command register              */
-#define SPEAKER_CTL 0x61   /* PC speaker / NMI control port     */
+#define VGA_DAC_W   0x3C8
+#define VGA_DAC_D   0x3C9
 
 static void set_mode13h(void);
 
@@ -47,45 +42,6 @@ static unsigned int rand_next(void)
     return rng_state;
 }
 
-/* Read PIT channel 0 current count (counts down at 1 193 180 Hz). */
-static unsigned short pit_count(void)
-{
-    outb(PIT_CMD, 0x00);              /* latch channel 0 */
-    unsigned char lo = inb(PIT_CH0);
-    unsigned char hi = inb(PIT_CH0);
-    return (unsigned short)(lo | (hi << 8));
-}
-
-/* Wait approximately ms milliseconds using PIT channel 0.
- * Processes in <=27 ms chunks to stay within the ~55 ms wrap window. */
-static void msleep(unsigned int ms)
-{
-    unsigned int ticks = ms * 1193u;
-    while (ticks > 0) {
-        unsigned int chunk = (ticks > 27000u) ? 27000u : ticks;
-        unsigned short start = pit_count();
-        while ((unsigned short)(start - pit_count()) < (unsigned short)chunk)
-            ;
-        ticks -= chunk;
-    }
-}
-
-/* Turn PC speaker on at freq Hz (programs PIT channel 2, mode 3). */
-static void speaker_on(unsigned int freq)
-{
-    unsigned int div = 1193180u / freq;
-    outb(PIT_CMD, 0xB6);                        /* ch2, lo/hi, mode 3 */
-    outb(PIT_CH2, (unsigned char)(div & 0xFF));
-    outb(PIT_CH2, (unsigned char)(div >> 8));
-    outb(SPEAKER_CTL, inb(SPEAKER_CTL) | 0x03); /* gate + enable      */
-}
-
-/* Turn PC speaker off. */
-static void speaker_off(void)
-{
-    outb(SPEAKER_CTL, inb(SPEAKER_CTL) & ~0x03);
-}
-
 void main(void)
 {
     set_mode13h();
@@ -97,14 +53,10 @@ void main(void)
         for (int i = 0; i < FB_SIZE; i++)
             fb[i] = (rand_next() & 1) ? 15 : 0; /* 0 = black, 15 = bright white */
 
-        /* Two short beeps: on 80 ms, off 170 ms, on 80 ms, off 170 ms = 500 ms */
-        speaker_on(1000);  msleep(80);
-        speaker_off();     msleep(170);
-        speaker_on(1000);  msleep(80);
-        speaker_off();     msleep(170);
-
+        /* Check for 'q' without blocking the animation */
         int c = get_char_nonblock();
-        if (c == 'q' || c == 'Q') { speaker_off(); exit(0); }
+        if (c == 'q' || c == 'Q')
+            exit(0);
     }
 }
 
