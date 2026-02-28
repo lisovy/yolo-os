@@ -98,7 +98,8 @@ EAX = syscall number, EBX = arg1, ECX = arg2, EDX = arg3, return value in EAX
 File descriptors: 0=stdin, 1=stdout, 2–5=FAT16 files (max 4 open, 16 KB buffer each)
 
 ## Program loader
-- `program_exec(name, args)` in kernel.c: appends `.bin`, reads file from FAT16 into 0x400000
+- `program_exec(name, args)` in kernel.c: appends `.bin`, loads it via `fat16_read_from_root`
+  (always from root, regardless of cwd) into 0x400000
 - Copies `args` string to `ARGS_BASE` (0x7FC000), sets `tss.esp0` to top of `tss_stack`
 - `exec_run(entry, user_stack_top)` in entry.asm: saves callee-saved regs + ESP to
   `exec_ret_esp`, then IRETes to ring 3 (CS=0x1B, SS=0x23, EFLAGS IF=1 IOPL=3)
@@ -109,7 +110,7 @@ File descriptors: 0=stdin, 1=stdout, 2–5=FAT16 files (max 4 open, 16 KB buffer
 ## Shell commands
 ```
 ls                    list files and dirs in cwd (dirs shown with trailing /)
-run <name> [args]     load and execute <name>.bin from cwd
+run <name> [args]     load <name>.bin from root, execute in cwd context
 rm <name>             delete file or empty dir (prompts y/N)
 mkdir <name>          create a subdirectory in cwd
 mv <src> <dst>        rename file or dir within cwd (no cross-dir moves)
@@ -117,7 +118,8 @@ cd <dir>              change directory; cd .. to go up; cd / or bare cd for root
 ```
 Arguments after the program name are passed via ARGS_BASE; read in programs with `get_args()`.
 Shell prompt shows cwd when not at root: `/subdir> `.
-`run` and file syscalls (open/read/write) use the current directory.
+`run` always loads the `.bin` from the root directory; file syscalls (open/read/write) inside
+the program use cwd.
 Shell supports inline editing with left/right arrow keys.
 
 ## User programs (bin/)

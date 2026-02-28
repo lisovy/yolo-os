@@ -72,7 +72,7 @@ After boot you get a simple interactive shell:
 
 ```
 > ls                    # list files and dirs (dirs shown with trailing /)
-> run hello             # run hello.bin
+> run hello             # load hello.bin from root, run it
 > run xxd BOOT.TXT      # run xxd.bin with argument "BOOT.TXT"
 > run vi notes.txt      # open notes.txt in the text editor
 > run demo              # start the graphics demo
@@ -85,7 +85,8 @@ After boot you get a simple interactive shell:
 
 - Left/right arrow keys move the cursor within the current line
 - Up/down arrows are ignored (no history)
-- Prompt shows current directory when not at root: `/docs> `
+- Prompt shows cwd when not at root: `/docs> `
+- `run` always loads `.bin` from the root directory; file syscalls inside the program use cwd
 
 ---
 
@@ -264,6 +265,7 @@ Direct x86 I/O port access. Available from ring 3 because the kernel sets `IOPL=
 | xxd_missing_file | `run xxd NOSUCHFILE.TXT` prints "cannot open" |
 | vi_quit | `run vi` + `:q!` returns to shell |
 | segfault | `run segfault` prints "Segmentation fault" and returns to shell |
+| fs_operations | `mkdir`, create file via `vi`, `rm` file, `rm` dir |
 
 ---
 
