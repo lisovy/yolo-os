@@ -9,8 +9,9 @@ Working directory on the development machine: `/tmp/os`
 - **Boot media**: IDE disk image (`disk.img`) booted via QEMU `-drive if=ide -boot c`
 - **Kernel load address**: 0x10000 (loaded by bootloader via INT 13h AH=0x42 LBA read)
 - **Stack**: 0x90000 (kernel stack, set by bootloader before jumping to kernel)
-- **Executables**: flat binary, loaded at 0x400000, run in ring 3, single process at a time
-- **Paging**: enabled; identity-mapped, 4 KB pages, U/S bits enforce kernel/user separation
+- **Executables**: flat binary, linked at virtual 0x400000, run in ring 3, single process at a time
+- **Paging**: per-process page tables; shell maps virtual 0x400000 → physical 0x800000;
+  child maps virtual 0x400000 → physical 0xC00000; U/S bits enforce kernel/user separation
 
 ## Hardware access
 - **Video**: VGA text mode, direct writes to 0xB8000 (80×25)
@@ -31,8 +32,8 @@ Working directory on the development machine: `/tmp/os`
 [0x20] ring-3 data  DPL=3, 32-bit, flat 4 GB  → selector 0x23 (0x20|3)
 [0x28] TSS          type=0x89, DPL=0           → selector 0x28
 ```
-TSS holds a separate 4 KB kernel stack (`tss_stack[]`); `tss.esp0` is updated before
-each `exec_run()` so ring-3 → ring-0 transitions land there.
+TSS holds a separate 4 KB kernel stack (`tss_stack[]`); `tss.esp0` is updated inside
+`exec_run()` so ring-3 → ring-0 transitions (syscalls) land safely below the saved context.
 
 ## Interrupts
 - IDT fully set up (256 entries)
@@ -43,17 +44,25 @@ each `exec_run()` so ring-3 → ring-0 transitions land there.
 - **#PF from ring 3** → prints "Segmentation fault", exit code 139, returns to shell
 
 ## Paging layout
-4 KB pages, identity-mapped. Two page tables cover 0–8 MB:
+Per-process page tables. All page dirs share `pt_kernel` (0–4 MB, supervisor-only except
+VGA framebuffers) and have kernel-only access to the high physical ranges.
 
-| Page table   | Virtual range    | PDE U | PTE U | Purpose                            |
-|--------------|-----------------|-------|-------|------------------------------------|
-| `pt_kernel`  | 0x000000–0x09FFFF | 1   | 0     | kernel, stack, BIOS — supervisor   |
-| `pt_kernel`  | 0x0A0000–0x0BFFFF | 1   | 1     | VGA framebuffers — user-accessible |
-| `pt_kernel`  | 0x0C0000–0x3FFFFF | 1   | 0     | BIOS ROM — supervisor              |
-| `pt_user`    | 0x400000–0x7FFFFF | 1   | 1     | user program + stack + args        |
+| Page directory  | Virtual 0x000000–0x3FFFFF | Virtual 0x400000–0x7FFFFF | Notes                    |
+|-----------------|--------------------------|--------------------------|--------------------------|
+| `page_dir`      | pt_kernel (U=0 mostly)   | pt_user (U=1, identity)  | used during kernel init  |
+| `page_dir_shell`| pt_kernel                | pt_user_shell → phys 0x800000 | shell process      |
+| `page_dir_child`| pt_kernel                | pt_user_child → phys 0xC00000 | child process      |
 
-PDE[0] has U=1 so the CPU consults individual PTEs for the kernel range.
-PDE[1] has U=1 for the user range.
+All page dirs have supervisor-only PDE[2] (pt_kern_high0, phys 0x800000–0xBFFFFF) and
+PDE[3] (pt_kern_high1, phys 0xC00000–0xFFFFFF) so the kernel can load binaries in any context.
+
+## Physical memory layout (new)
+```
+0x000000–0x0FFFFF   Kernel code + data + stack + BIOS
+0x400000–0x7FFFFF   (old identity-mapped user area, kept for pt_user)
+0x800000–0xBFFFFF   Shell binary + stack (virtual 0x400000–0x7FFFFF in page_dir_shell)
+0xC00000–0xFFFFFF   Child binary + stack (virtual 0x400000–0x7FFFFF in page_dir_child)
+```
 
 ## disk.img layout
 ```
@@ -70,74 +79,88 @@ After changing `KERNEL_SECTORS` run `make newdisk` to reformat the FAT16 partiti
 ```
 0x00000 - 0x00FFF   BIOS / IVT                    (supervisor only)
 0x07C00             MBR bootloader
-0x10000 - ~0x13800  Kernel (~14 KB)               (supervisor only)
+0x10000 - ~0x14000  Kernel (~16 KB)               (supervisor only)
 0x90000             Kernel stack top               (supervisor only)
 0xA0000             VGA graphics framebuffer (Mode 13h)  (user-accessible)
 0xB8000             VGA text mode memory           (user-accessible)
-0x400000            PROG_BASE — user program loaded here (max 256 KB)
-0x7FC000            ARGS_BASE — args string written by kernel before exec_run()
+0x400000            PROG_BASE — user program virtual base (both shell and child)
+0x7FC000            ARGS_BASE — args string in process virtual space
 0x7FF000            User stack top (grows downward)
+0x800000            Shell binary loaded here (physical, kernel writes via page_dir[2])
+0xBFC000            Shell's ARGS_BASE (physical) = SHELL_ARGS_KERN
+0xC00000            Child binary loaded here (physical, kernel writes via page_dir[3])
+0xFFC000            Child's ARGS_BASE (physical) = CHILD_ARGS_KERN
 ```
 
 ## Syscall interface (int 0x80)
 ```
 EAX = syscall number, EBX = arg1, ECX = arg2, EDX = arg3, return value in EAX
 ```
-| # | Name              | Args                   | Notes                                    |
-|---|-------------------|------------------------|------------------------------------------|
-| 0 | exit              | code                   | unwinds kernel stack via exec_ret_esp    |
-| 1 | write             | fd, buf, len → bytes   | fd 1 = stdout (VGA + serial)             |
-| 2 | read              | fd, buf, len → bytes   | fd 0 = stdin (keyboard, line-buffered)   |
-| 3 | open              | path, flags → fd or -1 | flags: 0=O_RDONLY, 1=O_WRONLY            |
-| 4 | close             | fd → 0 or -1           | O_WRONLY: flushes buffer to FAT16        |
-| 5 | getchar           | → char                 | blocking raw keyread, no echo            |
-| 6 | setpos            | row, col               | move VGA hardware cursor                 |
-| 7 | clrscr            | —                      | clear text area, cursor to 0,0           |
-| 8 | getchar_nonblock  | → char or 0            | non-blocking; 0 = no key ready           |
+| #  | Name              | Args                      | Notes                                     |
+|----|-------------------|---------------------------|-------------------------------------------|
+|  0 | exit              | code                      | unwinds kernel stack via exec_ret_esp     |
+|  1 | write             | fd, buf, len → bytes      | fd 1 = stdout (VGA + serial)              |
+|  2 | read              | fd, buf, len → bytes      | fd 0 = stdin (keyboard, line-buffered)    |
+|  3 | open              | path, flags → fd or -1    | flags: 0=O_RDONLY, 1=O_WRONLY             |
+|  4 | close             | fd → 0 or -1              | O_WRONLY: flushes buffer to FAT16         |
+|  5 | getchar           | → char                    | blocking raw keyread, no echo             |
+|  6 | setpos            | row, col                  | move VGA hardware cursor                  |
+|  7 | clrscr            | —                         | clear text area, cursor to 0,0            |
+|  8 | getchar_nonblock  | → char or 0               | non-blocking; 0 = no key ready            |
+|  9 | readdir           | buf, max → count          | fills struct direntry array for cwd       |
+| 10 | unlink            | name → 0/-1/-2            | -2 = directory not empty                  |
+| 11 | mkdir             | name → 0/-1               | create subdirectory in cwd                |
+| 12 | rename            | src, dst → 0/-1           | rename within cwd                         |
+| 13 | exec              | name, args → exit_code/-1 | load /bin/name, run as child process      |
+| 14 | chdir             | name → 0/-1               | change cwd; "/" or ".." supported         |
+| 15 | getpos            | → row*256+col             | get current VGA cursor position           |
 
 File descriptors: 0=stdin, 1=stdout, 2–5=FAT16 files (max 4 open, 16 KB buffer each)
 
-## Program loader
-- `program_exec(name, args)` in kernel.c: appends `.bin`, loads it via `fat16_read_from_root`
-  (always from root, regardless of cwd) into 0x400000
-- Copies `args` string to `ARGS_BASE` (0x7FC000), sets `tss.esp0` to top of `tss_stack`
-- `exec_run(entry, user_stack_top)` in entry.asm: saves callee-saved regs + ESP to
-  `exec_ret_esp`, then IRETes to ring 3 (CS=0x1B, SS=0x23, EFLAGS IF=1 IOPL=3)
-- `SYS_EXIT` or segfault: restores ESP from `exec_ret_esp`, pops saved regs, rets to
-  `program_exec()` as if `exec_run()` returned normally
-- After return: detects graphics-mode use via GC Misc register; calls `vga_restore_textmode()`
+## Process execution model
+- `kernel_main()` loads `/bin/sh` into physical 0x800000, switches CR3 to `page_dir_shell`,
+  then `exec_run(0x400000, 0x7FF000)` — shell sees it at virtual 0x400000.
+- `SYS_EXEC`: kernel copies name/args while CR3=page_dir_shell, switches to `page_dir_child`,
+  loads binary to physical 0xC00000, copies args to 0xFFC000, calls `exec_run()`.
+  After child exits, switches back to `page_dir_shell`, restores `exec_ret_esp`.
+- `exec_run()` in entry.asm: saves callee-saved regs + ESP to `exec_ret_esp`, then calls
+  `tss_set_ring0_stack(exec_ret_esp)` so nested syscalls land safely below saved context,
+  then IRETes to ring 3.
+- `SYS_EXIT` or segfault: restores ESP from `exec_ret_esp`, pops saved regs, returns.
 
-## Shell commands
+## Shell commands (user-space, in /bin)
 ```
 ls                    list files and dirs in cwd (dirs shown with trailing /)
-run <name> [args]     load <name>.bin from root, execute in cwd context
+<name> [args]         load /bin/<name>, execute with args
 rm <name>             delete file or empty dir (prompts y/N)
 mkdir <name>          create a subdirectory in cwd
 mv <src> <dst>        rename file or dir within cwd (no cross-dir moves)
-cd <dir>              change directory; cd .. to go up; cd / or bare cd for root
+cd [dir]              change directory; cd .. to go up; cd / or bare cd for root
+__exit                signal QEMU to exit (automated tests only)
 ```
-Arguments after the program name are passed via ARGS_BASE; read in programs with `get_args()`.
 Shell prompt shows cwd when not at root: `/subdir> `.
-`run` always loads the `.bin` from the root directory; file syscalls (open/read/write) inside
-the program use cwd.
 Shell supports inline editing with left/right arrow keys.
 
 ## User programs (bin/)
 Built as freestanding 32-bit flat binaries, linked at 0x400000 via `bin/user.ld`.
 Include `bin/os.h` for all syscall wrappers (no linking needed — all `static inline`).
 **Note:** all `.o` files depend on `bin/os.h` in the Makefile — changing `os.h` triggers recompile.
+Stored in `/bin` on FAT16 **without** `.bin` extension.
 
-| File             | Binary          | Description                                         |
-|------------------|-----------------|-----------------------------------------------------|
-| bin/os.h         | —               | syscall wrappers, get_args(), outb/inb              |
-| bin/user.ld      | —               | linker script (entry=main, base 0x400000)           |
-| bin/hello.c      | hello.bin       | hello world                                         |
-| bin/xxd.c        | xxd.bin         | hexdump: `run xxd <file>`                           |
-| bin/vi.c         | vi.bin          | vi-like text editor: `run vi <file>`                |
-| bin/demo.c       | demo.bin        | VGA Mode 13h snow animation: `run demo`; q to quit  |
-| bin/segfault.c   | segfault.bin    | writes to kernel address 0x1000 → triggers segfault |
-
-FAT16 naming: binaries stored as lowercase `hello.bin`, `xxd.bin`, etc.
+| File             | /bin name  | Description                                           |
+|------------------|------------|-------------------------------------------------------|
+| bin/os.h         | —          | syscall wrappers, get_args(), outb/inb, struct direntry |
+| bin/user.ld      | —          | linker script (entry=main, base 0x400000)             |
+| bin/sh.c         | sh         | user-space shell (first process)                      |
+| bin/hello.c      | hello      | hello world                                           |
+| bin/xxd.c        | xxd        | hexdump: `xxd <file>`                                 |
+| bin/vi.c         | vi         | vi-like text editor: `vi <file>`                      |
+| bin/demo.c       | demo       | VGA Mode 13h snow animation: `demo`; q to quit        |
+| bin/segfault.c   | segfault   | writes to kernel address 0x1000 → triggers segfault   |
+| bin/ls.c         | ls         | list directory contents                               |
+| bin/rm.c         | rm         | remove file or empty directory (prompts y/N)          |
+| bin/mkdir.c      | mkdir      | create directory                                      |
+| bin/mv.c         | mv         | rename file or directory                              |
 
 ## Source layout
 ```
@@ -145,17 +168,22 @@ boot/boot_ide.asm      16-bit MBR bootloader (NASM, -f bin); LBA INT 13h AH=0x42
 kernel/entry.asm       32-bit kernel entry (_start → kernel_main); exec_run (IRET to ring 3)
 kernel/isr.asm         ISR stubs for INT 0-47 + 128
 kernel/idt.c           GDT + TSS setup (gdt_init), IDT setup, PIC remapping
-kernel/kernel.c        paging_init, VGA, keyboard, serial, ATA, syscalls, program loader, shell
+kernel/kernel.c        paging_init, VGA, keyboard, serial, ATA, syscalls 0-15, shell launch
 kernel/fat16.c         FAT16 R/W driver (fat16_init, fat16_read, fat16_write, fat16_listdir,
-                       fat16_delete, fat16_mkdir, fat16_rename, fat16_chdir; cwd support)
+                       fat16_delete, fat16_mkdir, fat16_rename, fat16_chdir, fat16_read_from_bin)
 kernel/linker.ld       links kernel at 0x10000, entry.o first in .text
 bin/os.h               syscall header for user programs
 bin/user.ld            user program linker script
+bin/sh.c               user-space shell (first process)
 bin/hello.c            hello world
 bin/xxd.c              hexdump utility
 bin/vi.c               vi-like text editor
 bin/demo.c             VGA Mode 13h snow + animation demo
 bin/segfault.c         deliberate kernel-memory access for segfault testing
+bin/ls.c               list directory contents
+bin/rm.c               remove file or empty directory
+bin/mkdir.c            create directory
+bin/mv.c               rename file or directory
 scripts/patch_boot.sh  splices boot code with BPB from mkfs.fat into sector 0
 Makefile               build + run targets; KERNEL_SECTORS is the single size constant
 tests/run_tests.py     automated test suite (pexpect + QEMU)
@@ -174,16 +202,17 @@ make clean        # remove build artifacts (NOT disk.img — it holds persistent
 `tests/run_tests.py` spawns QEMU with `-serial stdio` and `-device isa-debug-exit`,
 sends commands over the serial port, and checks output with pexpect.
 
-| Test              | What it checks                                          |
-|-------------------|---------------------------------------------------------|
-| boot              | OS boots, welcome message, shell prompt                 |
-| unknown_command   | unknown input prints "unknown command"                  |
-| hello             | `run hello` output contains "Hello"                     |
-| ls                | `ls` lists all expected `.bin` files                    |
-| xxd               | `run xxd BOOT.TXT` prints hex dump starting "00000000:" |
-| xxd_missing_file  | `run xxd NOSUCHFILE.TXT` prints "cannot open"           |
-| vi_quit           | `run vi test.txt` + `:q!` returns to shell              |
-| segfault          | `run segfault` prints "Segmentation fault", returns to shell |
+| Test              | What it checks                                                   |
+|-------------------|------------------------------------------------------------------|
+| boot              | OS boots, welcome message, shell prompt                          |
+| unknown_command   | unknown input prints "unknown command"                           |
+| hello             | `hello` output contains "Hello"                                  |
+| ls                | `ls` lists `bin/`                                                |
+| xxd               | `xxd BOOT.TXT` prints hex dump starting "00000000:"              |
+| xxd_missing_file  | `xxd NOSUCHFILE.TXT` prints "cannot open"                        |
+| vi_quit           | `vi test.txt` + `:q!` returns to shell                           |
+| segfault          | `segfault` prints "Segmentation fault", returns to shell         |
+| fs_operations     | mkdir / vi (create file) / rm file / cd .. / rm dir             |
 
 ## QEMU invocation
 ```bash
@@ -200,6 +229,7 @@ qemu-system-i386 \
 - `ARGS_BASE = 0x7FC000`, `ARGS_MAX = 200` (kernel.c + os.h)
 - `USER_STACK_TOP = 0x7FF000` (kernel.c)
 - `FILE_BUF_SIZE = 16384` (kernel.c) — per-fd file buffer
+- `SHELL_LOAD_VIRT = 0x800000`, `CHILD_LOAD_VIRT = 0xC00000` (kernel.c)
 
 ## Roadmap
 - [x] Bootloader (16-bit, IDE, LBA, switches to 32-bit protected mode)
@@ -210,16 +240,16 @@ qemu-system-i386 \
 - [x] ATA PIO driver (read/write sectors)
 - [x] IDT (exceptions, PIC remapping)
 - [x] FAT16 R/W filesystem (persistent boot counter in BOOT.TXT)
-- [x] Syscall interface (int 0x80: exit, write, read, open, close, getchar, setpos, clrscr, getchar_nonblock)
-- [x] Program loader (flat binary from FAT16 → 0x400000, args via ARGS_BASE)
-- [x] Shell (ls, run [args], inline editing with arrow keys)
-- [x] User programs: hello, xxd, vi, demo, segfault
-- [x] VGA Mode 13h support in user programs (kernel auto-detects and restores text mode)
+- [x] Syscall interface (int 0x80: exit, write, read, open, close, getchar, setpos, clrscr,
+      getchar_nonblock, readdir, unlink, mkdir, rename, exec, chdir, getpos)
+- [x] Per-process page tables (shell phys 0x800000, child phys 0xC00000, both link at 0x400000)
+- [x] User-space shell (/bin/sh) as first process; kernel only boots and execs sh
+- [x] User-space file tools: ls, rm, mkdir, mv (all in /bin)
 - [x] GDT with ring-0/ring-3 segments + TSS
 - [x] x86 paging (identity map, U/S protection)
 - [x] Ring-3 execution via IRET (IOPL=3, user stack 0x7FF000)
 - [x] Segmentation fault detection (#PF from ring 3 → message + return to shell)
-- [x] Automated test suite (8 tests, pexpect + QEMU)
+- [x] Automated test suite (9 tests, pexpect + QEMU)
 
 ## User preferences
 - All code comments, commit messages and documentation: **English only**
