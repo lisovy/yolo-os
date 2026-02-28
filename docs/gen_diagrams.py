@@ -40,7 +40,7 @@ def draw_block(draw, x1, y1, x2, y2, fill, outline, title, subtitle, fb, fs):
 # ── disk-layout.png ───────────────────────────────────────────────────────────
 
 def make_disk_layout():
-    W, H = 700, 660
+    W, H = 700, 690
     img = Image.new("RGB", (W, H), "#f5f5f5")
     draw = ImageDraw.Draw(img)
 
@@ -66,7 +66,7 @@ def make_disk_layout():
     draw.text((LBL - draw.textbbox((0,0),"LBA 1",font=fl)[2], 234), "LBA 1", font=fl, fill="#555")
 
     # FAT16 outer
-    draw.rounded_rectangle([LX, 324, RX, 610], radius=6, fill="#ff9800", outline="#e65100", width=2)
+    draw.rounded_rectangle([LX, 324, RX, 638], radius=6, fill="#ff9800", outline="#e65100", width=2)
     text_center(draw, (LX+RX)//2, 344, "Sectors 129+", fb, "white")
     text_center(draw, (LX+RX)//2, 366, "FAT16 filesystem  (~3.9 MB)", fs, "white")
     draw.text((LBL - draw.textbbox((0,0),"LBA 129",font=fl)[2], 390), "LBA 129", font=fl, fill="#555")
@@ -78,13 +78,14 @@ def make_disk_layout():
     draw.rounded_rectangle([LX+16, 430, RX-16, 470], radius=4, fill="#e65100", outline="#bf360c", width=1)
     text_center(draw, (LX+RX)//2, 450, "Root directory  ( BOOT.TXT    bin/ )", fs, "white")
 
-    draw.rounded_rectangle([LX+16, 478, RX-16, 598], radius=4, fill="#bf360c", outline="#8d1a00", width=1)
+    draw.rounded_rectangle([LX+16, 478, RX-16, 626], radius=4, fill="#bf360c", outline="#8d1a00", width=1)
     text_center(draw, (LX+RX)//2, 503, "Data clusters", fs, "white")
     text_center(draw, (LX+RX)//2, 526, "BOOT.TXT", fl, "#ffccbc")
-    text_center(draw, (LX+RX)//2, 547, "bin/  →  sh   hello   xxd   vi   demo", fl, "#ffccbc")
+    text_center(draw, (LX+RX)//2, 548, "bin/  →  sh   hello   xxd   vi   demo", fl, "#ffccbc")
     text_center(draw, (LX+RX)//2, 568, "       segfault   ls   rm   mkdir   mv", fl, "#ffccbc")
+    text_center(draw, (LX+RX)//2, 588, "       panic   free", fl, "#ffccbc")
 
-    text_center(draw, W // 2, 638, "(heights not to scale)", fl, "#888")
+    text_center(draw, W // 2, 666, "(heights not to scale)", fl, "#888")
 
     out = os.path.join(os.path.dirname(__file__), "disk-layout.png")
     img.save(out)
@@ -93,7 +94,7 @@ def make_disk_layout():
 # ── memory-layout.png ─────────────────────────────────────────────────────────
 
 def make_memory_layout():
-    W, H = 780, 1020
+    W, H = 800, 1040
     img = Image.new("RGB", (W, H), "#f5f5f5")
     draw = ImageDraw.Draw(img)
 
@@ -103,7 +104,7 @@ def make_memory_layout():
     fl  = load_font_regular(13)
     fh  = load_font(14)
 
-    text_center(draw, W // 2, 34, "Physical memory layout  (running in QEMU)", ft, "#222")
+    text_center(draw, W // 2, 34, "Memory layout  (physical + virtual)", ft, "#222")
 
     LX   = 200
     RX   = 580
@@ -120,54 +121,73 @@ def make_memory_layout():
         draw.line([(LX, y+2), (RX, y+2)], fill=color, width=2)
         text_center(draw, (LX+RX)//2, y + 18, text, fh, color)
 
-    # ── kernel / hardware ─────────────────────────────────────────────────────
-    rows = [
-        (64,  44, "#9e9e9e", "#616161", "IVT / BIOS data",          "",               "0x00000",  "ring 0",   "#b71c1c"),
-        (116, 44, "#9e9e9e", "#616161", "MBR bootloader  (512 B)",   "",               "0x07C00",  "ring 0",   "#b71c1c"),
-        (168, 60, "#29b6f6", "#0277bd", "Kernel  (~16 KB)",          "",               "0x10000",  "ring 0",   "#b71c1c"),
-        (236, 44, "#eeeeee", "#bdbdbd", "free RAM  (supervisor)",    "",               "0x14000",  "ring 0",   "#b71c1c"),
-        (288, 44, "#ef6c00", "#bf360c", "Kernel stack  (grows ↓)",   "",               "0x90000",  "ring 0",   "#b71c1c"),
-        (340, 44, "#6d4c41", "#4e342e", "VGA graphics  (Mode 13h)",  "0xA0000",        "0xA0000",  "ring 0+3", "#1b5e20"),
-        (392, 44, "#6d4c41", "#4e342e", "VGA text framebuffer",      "0xB8000",        "0xB8000",  "ring 0+3", "#1b5e20"),
+    # ── physical: kernel / hardware ───────────────────────────────────────────
+    section_header(58, "Physical: kernel + hardware  (0x000000 – 0x0FFFFF)", "#424242")
+
+    kern_rows = [
+        (78,  38, "#9e9e9e", "#616161", "IVT / BIOS data",           "",   "0x00000",  "ring 0",   "#b71c1c"),
+        (122, 38, "#9e9e9e", "#616161", "MBR bootloader  (512 B)",    "",   "0x07C00",  "ring 0",   "#b71c1c"),
+        (166, 50, "#29b6f6", "#0277bd", "Kernel  (~16 KB)",           "",   "0x10000",  "ring 0",   "#b71c1c"),
+        (222, 34, "#eeeeee", "#bdbdbd", "free RAM  (supervisor)",     "",   "0x14000",  "ring 0",   "#b71c1c"),
+        (262, 38, "#ef6c00", "#bf360c", "Kernel stack  (grows ↓)",    "",   "0x90000",  "ring 0",   "#b71c1c"),
+        (306, 34, "#6d4c41", "#4e342e", "VGA graphics  (Mode 13h)",   "",   "0xA0000",  "ring 0+3", "#1b5e20"),
+        (346, 34, "#6d4c41", "#4e342e", "VGA text framebuffer",       "",   "0xB8000",  "ring 0+3", "#1b5e20"),
     ]
-    for (y, h, fill, outline, title, subtitle, addr, ring_txt, ring_color) in rows:
+    for (y, h, fill, outline, title, subtitle, addr, ring_txt, ring_color) in kern_rows:
         draw_block(draw, LX, y, RX, y+h, fill, outline, title, subtitle, fb, fs)
         addr_label(y + h//2, addr)
         ring_label(y + h//2 - 4, ring_txt, ring_color)
 
-    # ── shell process section ─────────────────────────────────────────────────
-    SY = 460
-    section_header(SY,
-        "shell process  (page_dir_shell)  ·  virtual 0x400000 → physical 0x800000",
-        "#2e7d32")
+    # ── physical: PMM dynamic region ──────────────────────────────────────────
+    PM_Y = 405
+    section_header(PM_Y - 10,
+        "Physical: PMM dynamic  (0x100000 – 0x7FFFFFFF · ~127 MB · 32 512 frames)",
+        "#00695c")
 
-    shell_rows = [
-        (SY+34, 52, "#43a047", "#2e7d32", "Shell code + data",   "virt 0x400000",    "0x800000"),
-        (SY+96, 38, "#7b1fa2", "#4a148c", "Shell ARGS_BASE",     "virt 0x7FC000",    "0xBFC000"),
-        (SY+144,38, "#f57c00", "#e65100", "Shell stack  (grows ↓)","virt 0x7FF000",  "0xBFF000"),
+    # PMM container box
+    draw.rounded_rectangle([LX, PM_Y + 22, RX, PM_Y + 318],
+                            radius=6, fill="#e0f2f1", outline="#00695c", width=2)
+    addr_label(PM_Y + 30, "0x100000")
+
+    # per-process breakdown inside container
+    text_center(draw, (LX+RX)//2, PM_Y + 38,
+                "per-process allocation  (~300 kB each)", fh, "#004d40")
+
+    pmm_rows = [
+        (PM_Y+ 56, 26, "#00897b", "#004d40", "page dir + page table   2 × 4 kB = 8 kB"),
+        (PM_Y+ 88, 68, "#43a047", "#2e7d32", "binary                 64 × 4 kB = 256 kB"),
+        (PM_Y+162, 36, "#f57c00", "#e65100", "stack + args            7 × 4 kB = 28 kB"),
+        (PM_Y+204, 26, "#5e35b1", "#311b92", "kernel stack            1 × 4 kB = 4 kB"),
     ]
-    for (y, h, fill, outline, title, subtitle, addr) in shell_rows:
-        draw_block(draw, LX, y, RX, y+h, fill, outline, title, subtitle, fb, fs)
-        addr_label(y + h//2, addr)
-        ring_label(y + h//2 - 4, "ring 3", "#1565c0")
+    for (y, h, fill, outline, title) in pmm_rows:
+        draw.rounded_rectangle([LX+14, y, RX-14, y+h],
+                                radius=4, fill=fill, outline=outline, width=1)
+        text_center(draw, (LX+RX)//2, y + h//2, title, fs, "white")
 
-    # ── child process section ─────────────────────────────────────────────────
-    CY = 652
-    section_header(CY,
-        "child process  (page_dir_child)  ·  virtual 0x400000 → physical 0xC00000",
+    text_center(draw, (LX+RX)//2, PM_Y + 248, "= 75 frames total per process", fh, "#00695c")
+    text_center(draw, (LX+RX)//2, PM_Y + 274, "× up to ~430 simultaneous processes", fl, "#00695c")
+    text_center(draw, (LX+RX)//2, PM_Y + 296, "unlimited nesting depth  ·  freed on exit", fl, "#00695c")
+
+    # ── virtual address space per process ─────────────────────────────────────
+    VY = PM_Y + 342
+    section_header(VY - 10,
+        "Virtual address space per process  (all link at 0x400000)",
         "#1565c0")
 
-    child_rows = [
-        (CY+34, 52, "#1976d2", "#0d47a1", "Child code + data",  "virt 0x400000",    "0xC00000"),
-        (CY+96, 38, "#7b1fa2", "#4a148c", "Child ARGS_BASE",    "virt 0x7FC000",    "0xFFC000"),
-        (CY+144,38, "#f57c00", "#e65100", "Child stack  (grows ↓)","virt 0x7FF000", "0xFFF000"),
+    virt_rows = [
+        (VY+ 12, 40, "#9e9e9e", "#616161", "kernel  (supervisor only)",   "0x000000", "ring 0",   "#b71c1c"),
+        (VY+ 58, 44, "#43a047", "#2e7d32", "binary  256 kB",              "0x400000", "ring 3",   "#1565c0"),
+        (VY+108, 28, "#e0e0e0", "#bdbdbd", "unmapped  (∼3.7 MB)",         "0x440000", "",         "#888888"),
+        (VY+142, 28, "#7b1fa2", "#4a148c", "args  (ARGS_BASE = 0x7FC000)","0x7FC000", "ring 3",   "#1565c0"),
+        (VY+176, 36, "#f57c00", "#e65100", "stack  28 kB  (grows ↓)",     "0x7FF000", "ring 3",   "#1565c0"),
     ]
-    for (y, h, fill, outline, title, subtitle, addr) in child_rows:
-        draw_block(draw, LX, y, RX, y+h, fill, outline, title, subtitle, fb, fs)
+    for (y, h, fill, outline, title, addr, ring_txt, ring_color) in virt_rows:
+        draw_block(draw, LX, y, RX, y+h, fill, outline, title, "", fb, fs)
         addr_label(y + h//2, addr)
-        ring_label(y + h//2 - 4, "ring 3", "#1565c0")
+        if ring_txt:
+            ring_label(y + h//2 - 4, ring_txt, ring_color)
 
-    text_center(draw, W // 2, 990, "(not to scale — gaps between regions omitted)", fl, "#888")
+    text_center(draw, W // 2, H - 20, "(heights not to scale)", fl, "#888")
 
     out = os.path.join(os.path.dirname(__file__), "memory-layout.png")
     img.save(out)

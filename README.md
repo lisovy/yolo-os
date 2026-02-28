@@ -22,7 +22,9 @@ make test
 ## Architecture
 
 - **CPU**: 32-bit protected mode; kernel in ring 0, user programs in ring 3
-- **Paging**: per-process page tables; U/S bits enforce kernel/user separation; segfaults caught
+- **Paging**: PMM bitmap allocator hands out physical frames per process; per-process page
+  directories with PSE large pages for kernel identity access; U/S bits enforce ring separation;
+  segfaults caught; unlimited process nesting depth
 - **Boot**: 16-bit MBR bootloader → ATA PIO LBA read → jumps to 32-bit kernel at `0x10000`
 - **Video**: VGA text mode 80×25 (`0xB8000`); user programs may switch to Mode 13h graphics
 - **Keyboard**: PS/2 polling, scan code set 1, US QWERTY, arrow keys supported
@@ -53,9 +55,10 @@ User programs live in the `/bin` directory on the FAT16 partition (stored withou
 
 ![memory layout](docs/memory-layout.png)
 
-Two physical memory slots are reserved for processes. Both the shell and any child program
-link at virtual `0x400000`; per-process page tables map that virtual address to different
-physical frames.
+Physical memory above 1 MB is managed by a bitmap PMM. Each process receives its own set of
+frames (~300 KB: page directory, page table, 256 KB binary, 28 KB stack, 4 KB kernel stack).
+All processes link at virtual `0x400000`; per-process page tables map that address to the
+process's own physical frames. Up to ~430 processes can run simultaneously.
 
 | Physical address | Content | Ring |
 |-----------------|---------|------|
@@ -65,18 +68,22 @@ physical frames.
 | `0x90000` | Kernel stack top (grows down) | 0 only |
 | `0xA0000` | VGA graphics framebuffer (Mode 13h, 320×200) | 0 + 3 |
 | `0xB8000` | VGA text framebuffer (80×25) | 0 + 3 |
-| `0x800000` | Shell binary (`/bin/sh`) — virtual `0x400000` in `page_dir_shell` | 3 |
-| `0xBFC000` | Shell args area (`ARGS_BASE`) | 3 |
-| `0xBFF000` | Shell stack top (grows down) | 3 |
-| `0xC00000` | Child binary — virtual `0x400000` in `page_dir_child` | 3 |
-| `0xFFC000` | Child args area | 3 |
-| `0xFFF000` | Child stack top (grows down) | 3 |
+| `0x100000+` | PMM dynamic region (~127 MB) — per-process frames allocated here | — |
+
+Virtual address space per process (all programs link at `0x400000`):
+
+| Virtual address | Content |
+|----------------|---------|
+| `0x000000–0x3FFFFF` | Kernel (supervisor only) |
+| `0x400000–0x43FFFF` | Binary (256 KB, ring 3) |
+| `0x7FC000` | `ARGS_BASE` — argument string |
+| `0x7FF000` | Stack top (grows down, ring 3) |
 
 ---
 
 ## Shell
 
-The kernel boots, loads `/bin/sh` into the shell slot (physical `0x800000`), and execs it.
+The kernel boots, calls the PMM, allocates a process for `/bin/sh`, and execs it.
 All user interaction happens inside the shell process.
 
 ```
@@ -90,6 +97,7 @@ All user interaction happens inside the shell process.
 > vi notes.txt          # open notes.txt in the text editor
 > vi /docs/notes.txt    # create/open file via absolute path
 > demo                  # start the graphics demo
+> free                  # show memory usage in kB
 > mkdir docs            # create a subdirectory in cwd
 > rm file.txt           # delete file (prompts y/N)
 > mv foo.txt bar.txt    # rename within current directory
@@ -171,6 +179,19 @@ Renames a file or directory within the current directory. Usage: `mv <src> <dst>
 Deliberately writes to a kernel-only address (`0x1000`) to trigger a page fault.
 The kernel prints "Segmentation fault" and returns to the shell.
 Useful for verifying that ring-3 memory protection works.
+
+### free
+
+Displays physical and virtual memory usage in kB.
+
+```
+         total       used       free
+Phys:   130048 kB     592 kB   129456 kB
+Virt:     8192 kB     568 kB     7624 kB   (2 procs)
+```
+
+- **Phys**: PMM stats — total managed RAM (~127 MB), allocated frames, free frames
+- **Virt**: per-process virtual address space (4 MB each) × number of active processes; used = mapped pages
 
 ### panic
 
@@ -354,6 +375,24 @@ Intended for testing and fatal error conditions in user programs.
 ---
 
 ```c
+int meminfo(struct meminfo *info);
+```
+Fill `*info` with memory statistics. Returns `0`.
+```c
+struct meminfo {
+    unsigned int phys_total_kb;   /* total PMM frames × 4                    */
+    unsigned int phys_used_kb;    /* allocated frames × 4                    */
+    unsigned int phys_free_kb;    /* free frames × 4                         */
+    unsigned int virt_total_kb;   /* 4096 × n_procs (4 MB per process)       */
+    unsigned int virt_used_kb;    /* mapped user pages × 4 across all procs  */
+    unsigned int virt_free_kb;    /* unmapped user pages × 4                 */
+    int          n_procs;         /* number of active processes               */
+};
+```
+
+---
+
+```c
 void outb(unsigned short port, unsigned char val);
 unsigned char inb(unsigned short port);
 ```
@@ -377,6 +416,7 @@ Direct x86 I/O port access. Available from ring 3 because the kernel sets `IOPL=
 | segfault | `segfault` prints "Segmentation fault" and returns to shell |
 | fs_operations | `mkdir`, create file via `vi`, `rm` file, `rm` dir |
 | paths | absolute paths: `xxd /bin/hello`, `cd /bin`, `vi /dir/file`, `xxd`/`rm` via full paths |
+| free | Phys/Virt rows present, total=130048 kB, kB units, (2 procs) |
 | panic | `panic` prints `[PANIC]` on serial and halts the system (run last) |
 
 ---

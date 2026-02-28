@@ -9,9 +9,11 @@ Working directory on the development machine: `/tmp/os`
 - **Boot media**: IDE disk image (`disk.img`) booted via QEMU `-drive if=ide -boot c`
 - **Kernel load address**: 0x10000 (loaded by bootloader via INT 13h AH=0x42 LBA read)
 - **Stack**: 0x90000 (kernel stack, set by bootloader before jumping to kernel)
-- **Executables**: flat binary, linked at virtual 0x400000, run in ring 3, single process at a time
-- **Paging**: per-process page tables; shell maps virtual 0x400000 → physical 0x800000;
-  child maps virtual 0x400000 → physical 0xC00000; U/S bits enforce kernel/user separation
+- **Executables**: flat binary, linked at virtual 0x400000, run in ring 3, single active process at a time
+- **Paging**: PMM bitmap allocator (0x100000–0x7FFFFFFF) hands out physical frames per process;
+  each process owns a page directory (CR3) with shared `pt_kernel` (PDE[0]) + per-process user PT
+  (PDE[1]); PDE[2–511] are 4 MB PSE supervisor-only identity pages so the kernel can write to any
+  physical frame; U/S bits enforce ring separation; unlimited nesting depth
 
 ## Hardware access
 - **Video**: VGA text mode, direct writes to 0xB8000 (80×25)
@@ -44,24 +46,24 @@ TSS holds a separate 4 KB kernel stack (`tss_stack[]`); `tss.esp0` is updated in
 - **#PF from ring 3** → prints "Segmentation fault", exit code 139, returns to shell
 
 ## Paging layout
-Per-process page tables. All page dirs share `pt_kernel` (0–4 MB, supervisor-only except
-VGA framebuffers) and have kernel-only access to the high physical ranges.
+Two static page tables; everything else is allocated dynamically by the PMM.
 
-| Page directory  | Virtual 0x000000–0x3FFFFF | Virtual 0x400000–0x7FFFFF | Notes                    |
-|-----------------|--------------------------|--------------------------|--------------------------|
-| `page_dir`      | pt_kernel (U=0 mostly)   | pt_user (U=1, identity)  | used during kernel init  |
-| `page_dir_shell`| pt_kernel                | pt_user_shell → phys 0x800000 | shell process      |
-| `page_dir_child`| pt_kernel                | pt_user_child → phys 0xC00000 | child process      |
+| Page directory       | PDE[0]                  | PDE[1]                          | PDE[2–511]                  |
+|----------------------|-------------------------|---------------------------------|-----------------------------|
+| `page_dir` (kernel)  | pt_kernel (4 KB pages)  | 4 MB PSE identity (supervisor)  | 4 MB PSE identity (supervisor) |
+| per-process PD       | pt_kernel (shared)      | per-process user PT (ring 3)    | 4 MB PSE identity (supervisor) |
 
-All page dirs have supervisor-only PDE[2] (pt_kern_high0, phys 0x800000–0xBFFFFF) and
-PDE[3] (pt_kern_high1, phys 0xC00000–0xFFFFFF) so the kernel can load binaries in any context.
+`pt_kernel` maps 0–4 MB identity, supervisor-only (0xA0000–0xBFFFF additionally U=1 for VGA).
+PDE[2–511] in every page directory are 4 MB PSE entries covering 8 MB–2 GB; they let the kernel
+write to any PMM-allocated physical frame without per-process kernel mappings.
 
-## Physical memory layout (new)
+## Physical memory layout
 ```
-0x000000–0x0FFFFF   Kernel code + data + stack + BIOS
-0x400000–0x7FFFFF   (old identity-mapped user area, kept for pt_user)
-0x800000–0xBFFFFF   Shell binary + stack (virtual 0x400000–0x7FFFFF in page_dir_shell)
-0xC00000–0xFFFFFF   Child binary + stack (virtual 0x400000–0x7FFFFF in page_dir_child)
+0x000000–0x0FFFFF   Kernel code + data + stack + BIOS  (static, mapped by pt_kernel)
+0x100000–0x7FFFFFFF  PMM-managed dynamic region (~127 MB, 32 512 frames of 4 KB)
+                     per process: 1 PD + 1 PT + 64 binary frames + 7 stack frames
+                                  + 1 kstack = 75 frames = ~300 KB
+                     maximum simultaneous processes: ~430
 ```
 
 ## disk.img layout
@@ -77,19 +79,20 @@ After changing `KERNEL_SECTORS` run `make newdisk` to reformat the FAT16 partiti
 
 ## Memory layout
 ```
+Physical:
 0x00000 - 0x00FFF   BIOS / IVT                    (supervisor only)
 0x07C00             MBR bootloader
 0x10000 - ~0x14000  Kernel (~16 KB)               (supervisor only)
 0x90000             Kernel stack top               (supervisor only)
 0xA0000             VGA graphics framebuffer (Mode 13h)  (user-accessible)
 0xB8000             VGA text mode memory           (user-accessible)
-0x400000            PROG_BASE — user program virtual base (both shell and child)
-0x7FC000            ARGS_BASE — args string in process virtual space
-0x7FF000            User stack top (grows downward)
-0x800000            Shell binary loaded here (physical, kernel writes via page_dir[2])
-0xBFC000            Shell's ARGS_BASE (physical) = SHELL_ARGS_KERN
-0xC00000            Child binary loaded here (physical, kernel writes via page_dir[3])
-0xFFC000            Child's ARGS_BASE (physical) = CHILD_ARGS_KERN
+0x100000+           PMM dynamic region  (per-process frames allocated here)
+
+Virtual (per process, all link at 0x400000):
+0x000000 - 0x3FFFFF  kernel  (supervisor only, pt_kernel)
+0x400000 - 0x43FFFF  binary  (PROG_BASE, 256 KB, ring 3)
+0x7FC000             ARGS_BASE — args string
+0x7FF000             USER_STACK_TOP — stack top (grows downward)
 ```
 
 ## Syscall interface (int 0x80)
@@ -115,15 +118,20 @@ EAX = syscall number, EBX = arg1, ECX = arg2, EDX = arg3, return value in EAX
 | 14 | chdir             | name → 0/-1               | change cwd; "/" or ".." supported         |
 | 15 | getpos            | → row*256+col             | get current VGA cursor position           |
 | 16 | panic             | msg_ptr → (no return)     | full-screen red panic + register dump + hlt |
+| 17 | meminfo           | meminfo_ptr → 0           | fills struct meminfo with PMM + virtual stats |
 
 File descriptors: 0=stdin, 1=stdout, 2–5=FAT16 files (max 4 open, 16 KB buffer each)
 
 ## Process execution model
-- `kernel_main()` loads `/bin/sh` into physical 0x800000, switches CR3 to `page_dir_shell`,
-  then `exec_run(0x400000, 0x7FF000)` — shell sees it at virtual 0x400000.
-- `SYS_EXEC`: kernel copies name/args while CR3=page_dir_shell, switches to `page_dir_child`,
-  loads binary to physical 0xC00000, copies args to 0xFFC000, calls `exec_run()`.
-  After child exits, switches back to `page_dir_shell`, restores `exec_ret_esp`.
+- `kernel_main()` calls `pmm_init()`, then `process_create("sh", "")` which allocates PMM
+  frames, builds a per-process page directory, and loads `/bin/sh`; sets CR3 to shell's PD,
+  then `exec_run(0x400000, 0x7FF000)`.
+- `SYS_EXEC`: copies name/args from parent user space, switches CR3 to kernel `page_dir`,
+  calls `process_create()` (allocates PMM frames, loads binary, builds page tables), saves
+  parent's `exec_ret_esp` in child PCB, switches CR3 to child PD, calls `exec_run()`.
+  After child exits: restores `exec_ret_esp` from child PCB, switches back to kernel `page_dir`,
+  calls `process_destroy()` (frees all PMM frames), restores parent CR3.
+  Supports unlimited nesting depth: each level's `exec_ret_esp` is saved in its child's PCB.
 - `exec_run()` in entry.asm: saves callee-saved regs + ESP to `exec_ret_esp`, then calls
   `tss_set_ring0_stack(exec_ret_esp)` so nested syscalls land safely below saved context,
   then IRETes to ring 3.
@@ -140,6 +148,7 @@ cd [dir]              change directory; cd .. to go up; cd / or bare cd for root
 clear                 clear the screen (clrscr syscall)
 exit                  exit the shell (kernel prints "Shell exited. System halted." and halts)
 __exit                signal QEMU to exit (automated tests only)
+free                  show physical and virtual memory usage in kB (runs /bin/free)
 ```
 Shell prompt shows cwd when not at root: `/subdir> ` (green, color 0x0A).
 Shell supports inline editing with left/right arrow keys.
@@ -152,7 +161,7 @@ Stored in `/bin` on FAT16 **without** `.bin` extension.
 
 | File             | /bin name  | Description                                           |
 |------------------|------------|-------------------------------------------------------|
-| bin/os.h         | —          | syscall wrappers, get_args(), outb/inb, struct direntry |
+| bin/os.h         | —          | syscall wrappers, get_args(), outb/inb, struct direntry, struct meminfo |
 | bin/user.ld      | —          | linker script (entry=main, base 0x400000)             |
 | bin/sh.c         | sh         | user-space shell (first process)                      |
 | bin/hello.c      | hello      | hello world                                           |
@@ -165,6 +174,7 @@ Stored in `/bin` on FAT16 **without** `.bin` extension.
 | bin/mkdir.c      | mkdir      | create directory                                      |
 | bin/mv.c         | mv         | rename file or directory                              |
 | bin/panic.c      | panic      | trigger kernel panic with optional message            |
+| bin/free.c       | free       | show physical and virtual memory usage in kB          |
 
 ## Source layout
 ```
@@ -172,11 +182,16 @@ boot/boot_ide.asm      16-bit MBR bootloader (NASM, -f bin); LBA INT 13h AH=0x42
 kernel/entry.asm       32-bit kernel entry (_start → kernel_main); exec_run (IRET to ring 3)
 kernel/isr.asm         ISR stubs for INT 0-47 + 128
 kernel/idt.c           GDT + TSS setup (gdt_init), IDT setup, PIC remapping
-kernel/kernel.c        paging_init, VGA, keyboard, serial, ATA, syscalls 0-16, panic_screen, shell launch
+kernel/kernel.c        paging_init (PSE), PMM include, PCB (struct process, g_procs),
+                       process_create/destroy, VGA, keyboard, serial, ATA,
+                       syscalls 0-17, panic_screen, kernel_main
+kernel/pmm.c           bitmap physical memory manager (pmm_init, pmm_alloc,
+                       pmm_alloc_contiguous, pmm_free, pmm_total, pmm_count_used)
+kernel/pmm.h           PMM public API
 kernel/fat16.c         FAT16 R/W driver (fat16_init, fat16_read, fat16_write, fat16_listdir,
                        fat16_delete, fat16_mkdir, fat16_rename, fat16_chdir, fat16_read_from_bin)
 kernel/linker.ld       links kernel at 0x10000, entry.o first in .text
-bin/os.h               syscall header for user programs
+bin/os.h               syscall header (wrappers, get_args(), struct direntry, struct meminfo)
 bin/user.ld            user program linker script
 bin/sh.c               user-space shell (first process)
 bin/hello.c            hello world
@@ -189,6 +204,7 @@ bin/rm.c               remove file or empty directory
 bin/mkdir.c            create directory
 bin/mv.c               rename file or directory
 bin/panic.c            trigger kernel panic via SYS_PANIC syscall
+bin/free.c             physical + virtual memory usage (SYS_MEMINFO)
 scripts/patch_boot.sh  splices boot code with BPB from mkfs.fat into sector 0
 Makefile               build + run targets; KERNEL_SECTORS is the single size constant
 tests/run_tests.py     automated test suite (pexpect + QEMU)
@@ -219,6 +235,7 @@ sends commands over the serial port, and checks output with pexpect.
 | segfault          | `segfault` prints "Segmentation fault", returns to shell         |
 | fs_operations     | mkdir / vi (create file) / rm file / cd .. / rm dir             |
 | paths             | absolute paths: `xxd /bin/hello`, `cd /bin`, `vi /dir/file`, `xxd`/`rm` via full paths |
+| free              | Phys/Virt rows, total=130048 kB (32512×4), kB units, (2 procs)  |
 | panic             | `panic` prints `[PANIC]` on serial, system halts (run last)      |
 
 ## QEMU invocation
@@ -236,7 +253,9 @@ qemu-system-i386 \
 - `ARGS_BASE = 0x7FC000`, `ARGS_MAX = 200` (kernel.c + os.h)
 - `USER_STACK_TOP = 0x7FF000` (kernel.c)
 - `FILE_BUF_SIZE = 16384` (kernel.c) — per-fd file buffer
-- `SHELL_LOAD_VIRT = 0x800000`, `CHILD_LOAD_VIRT = 0xC00000` (kernel.c)
+- `PMM_BASE = 0x100000`, `PMM_END = 0x8000000` (kernel/pmm.c) — dynamic frame region
+- `PMM_TOTAL_FRAMES = 32512` (kernel/pmm.c) — total managed frames; if changed, update `130048` in test_free
+- `PROC_MAX_PROCS = 32`, `PROC_MAX_FRAMES = 80` (kernel.c) — PCB table limits
 - `MAX_PATH = 127` (kernel.c fd_entry.name[128]) — max open/write path length; `sys_open` returns -1 if exceeded
 - `CWD_MAX = 128` (bin/sh.c) — shell prompt path buffer; `cd` prints "cd: path too long" if exceeded
 
@@ -251,7 +270,9 @@ qemu-system-i386 \
 - [x] FAT16 R/W filesystem (persistent boot counter in BOOT.TXT)
 - [x] Syscall interface (int 0x80: exit, write, read, open, close, getchar, setpos, clrscr,
       getchar_nonblock, readdir, unlink, mkdir, rename, exec, chdir, getpos)
-- [x] Per-process page tables (shell phys 0x800000, child phys 0xC00000, both link at 0x400000)
+- [x] Per-process page tables via PMM (dynamic allocation, unlimited nesting depth)
+- [x] PMM bitmap allocator (kernel/pmm.c) — 0x100000–0x7FFFFFFF, 32 512 frames
+- [x] PCB (struct process, g_procs[]) with per-process CR3, frame list, saved exec context
 - [x] User-space shell (/bin/sh) as first process; kernel only boots and execs sh
 - [x] User-space file tools: ls, rm, mkdir, mv (all in /bin)
 - [x] GDT with ring-0/ring-3 segments + TSS
@@ -263,7 +284,8 @@ qemu-system-i386 \
 - [x] Shell built-ins: `clear` (clrscr), `exit` (halts system with message)
 - [x] Path support in FAT16 (absolute + multi-component paths in open/write/delete/mkdir/chdir)
 - [x] Path length limit 127 bytes enforced with user-visible errors
-- [x] Automated test suite (11 tests, pexpect + QEMU)
+- [x] SYS_MEMINFO (syscall 17) + `free` utility — physical/virtual memory stats in kB
+- [x] Automated test suite (12 tests, pexpect + QEMU)
 
 ## User preferences
 - All code comments, commit messages and documentation: **English only**
