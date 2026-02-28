@@ -38,7 +38,7 @@ KOBJS := $(BUILD)/entry.o $(BUILD)/isr.o $(BUILD)/idt.o \
 USER_BINS := $(BUILD)/hello.bin $(BUILD)/xxd.bin $(BUILD)/vi.bin $(BUILD)/demo.bin
 
 # ======================================================================
-.PHONY: all run clean newdisk
+.PHONY: all run clean newdisk test
 
 all: $(DISK_IMG)
 
@@ -155,6 +155,11 @@ run: $(DISK_IMG)
 	  -drive file=$(DISK_IMG),format=raw,if=ide \
 	  -serial stdio \
 	  -boot c
+
+# --- Automated tests --------------------------------------------------
+
+test: $(DISK_IMG)
+	python3 tests/run_tests.py --disk $(DISK_IMG)
 
 # --- Cleanup ----------------------------------------------------------
 # disk.img is intentionally NOT removed by clean (holds persistent data).

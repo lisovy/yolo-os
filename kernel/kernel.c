@@ -351,6 +351,12 @@ static int e0_seen = 0;   /* set when 0xE0 prefix byte is received */
  */
 static char kbd_getchar(void)
 {
+    /* Check COM1 receive buffer first (used by automated tests via -serial stdio). */
+    if (inb(COM1 + 5) & 0x01) {
+        char c = (char)inb(COM1);
+        return (c == '\r') ? '\n' : c;   /* normalise CR → LF */
+    }
+
     if (!(inb(KBD_STATUS) & 0x01))
         return 0;
 
@@ -1096,6 +1102,13 @@ void kernel_main(void)
                 program_exec(prog, args);
             } else if (cmd[0] == 'l' && cmd[1] == 's' && cmd[2] == '\0') {
                 cmd_ls();
+            } else if (cmd[0] == '_' && cmd[1] == '_' &&
+                       cmd[2] == 'e' && cmd[3] == 'x' && cmd[4] == 'i' &&
+                       cmd[5] == 't' && cmd[6] == '\0') {
+                /* Signal QEMU to exit cleanly (used by automated tests).
+                 * Requires -device isa-debug-exit,iobase=0xf4,iosize=0x04.
+                 * QEMU exit code = (0x31 << 1) | 1 = 99. */
+                outb(0xF4, 0x31);
             } else if (cmd[0]) {
                 vga_print("unknown command\n", COLOR_DEFAULT);
             }
