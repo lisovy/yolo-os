@@ -270,7 +270,7 @@ def test_free(child: pexpect.spawn):
 
 def test_malloc(child: pexpect.spawn):
     """malloc_test: alloc, write, free+reuse, large alloc, over-limit → NULL."""
-    child.sendline('malltest')
+    child.sendline('t_mall1')
     try:
         child.expect('malloc: OK', timeout=20)
         wait_prompt(child)
@@ -281,7 +281,7 @@ def test_malloc(child: pexpect.spawn):
 
 def test_malloc_oob(child: pexpect.spawn):
     """malloc_oob: accessing unmapped heap causes segfault."""
-    child.sendline('malloob')
+    child.sendline('t_mall2')
     try:
         child.expect('Segmentation fault', timeout=TIMEOUT_CMD)
         wait_prompt(child)
@@ -392,8 +392,8 @@ TESTS = [
     ('fs_operations',     test_fs_operations),
     ('paths',             test_paths),
     ('free',              test_free),
-    ('malltest',          test_malloc),
-    ('malloob',           test_malloc_oob),
+    ('t_mall1',           test_malloc),
+    ('t_mall2',           test_malloc_oob),
     ('panic',             test_panic),   # must be last — halts the system
 ]
 

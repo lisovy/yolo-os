@@ -39,7 +39,7 @@ USER_BINS := $(BUILD)/sh.bin $(BUILD)/hello.bin $(BUILD)/xxd.bin $(BUILD)/vi.bin
              $(BUILD)/demo.bin $(BUILD)/segfault.bin \
              $(BUILD)/ls.bin $(BUILD)/rm.bin $(BUILD)/mkdir.bin $(BUILD)/mv.bin \
              $(BUILD)/panic.bin $(BUILD)/free.bin \
-             $(BUILD)/malltest.bin $(BUILD)/malloob.bin
+             $(BUILD)/t_mall1.bin $(BUILD)/t_mall2.bin
 
 # ======================================================================
 .PHONY: all run clean newdisk test
@@ -159,22 +159,22 @@ $(BUILD)/free.elf: $(BUILD)/free.o bin/user.ld
 $(BUILD)/free.bin: $(BUILD)/free.elf
 	$(OBJCPY) -O binary $< $@
 
-$(BUILD)/malltest.o: bin/malltest.c bin/os.h bin/malloc.h | $(BUILD)
+$(BUILD)/t_mall1.o: bin/t_mall1.c bin/os.h bin/malloc.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/malltest.elf: $(BUILD)/malltest.o bin/user.ld
+$(BUILD)/t_mall1.elf: $(BUILD)/t_mall1.o bin/user.ld
 	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
 
-$(BUILD)/malltest.bin: $(BUILD)/malltest.elf
+$(BUILD)/t_mall1.bin: $(BUILD)/t_mall1.elf
 	$(OBJCPY) -O binary $< $@
 
-$(BUILD)/malloob.o: bin/malloob.c bin/os.h | $(BUILD)
+$(BUILD)/t_mall2.o: bin/t_mall2.c bin/os.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/malloob.elf: $(BUILD)/malloob.o bin/user.ld
+$(BUILD)/t_mall2.elf: $(BUILD)/t_mall2.o bin/user.ld
 	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
 
-$(BUILD)/malloob.bin: $(BUILD)/malloob.elf
+$(BUILD)/t_mall2.bin: $(BUILD)/t_mall2.elf
 	$(OBJCPY) -O binary $< $@
 
 # --- Bootloader -------------------------------------------------------
