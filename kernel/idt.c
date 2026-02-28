@@ -1,9 +1,10 @@
 /*
- * idt.c - IDT setup and PIC 8259 remapping
+ * idt.c - IDT setup, GDT + TSS, and PIC 8259 remapping
  *
  * Sets up 256-entry IDT, remaps the 8259 PIC so that hardware IRQs
  * land at INT 32-47 (not 8-15 where they would collide with CPU exceptions),
- * and installs gates for exceptions (0-31), IRQs (32-47) and syscall (128).
+ * installs gates for exceptions (0-31), IRQs (32-47) and syscall (128).
+ * Also sets up a 6-entry GDT with ring-0/ring-3 segments and a TSS.
  */
 
 /* ============================================================
@@ -14,6 +15,117 @@ static inline void outb(unsigned short port, unsigned char val)
 {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
+
+/* ============================================================
+ * GDT — 6 descriptors
+ * ============================================================ */
+
+typedef unsigned int   uint32_t;
+typedef unsigned short uint16_t;
+typedef unsigned char  uint8_t;
+
+struct gdt_entry {
+    uint16_t limit_low;    /* limit bits 0-15     */
+    uint16_t base_low;     /* base  bits 0-15     */
+    uint8_t  base_mid;     /* base  bits 16-23    */
+    uint8_t  access;       /* type + DPL + P      */
+    uint8_t  granularity;  /* limit bits 16-19 + flags */
+    uint8_t  base_high;    /* base  bits 24-31    */
+} __attribute__((packed));
+
+struct gdt_ptr {
+    uint16_t limit;
+    uint32_t base;
+} __attribute__((packed));
+
+/* TSS — only the fields used by the CPU for ring-0 stack on privilege change */
+typedef struct {
+    uint32_t prev_tss;
+    uint32_t esp0;        /* ring-0 stack pointer used on INT from ring 3 */
+    uint16_t ss0;         /* ring-0 stack segment                         */
+    uint16_t pad0;
+    /* remaining 88 bytes not used — zeroed */
+    uint32_t unused[22];
+    uint16_t iopb_offset; /* points past TSS end → no I/O permission bitmap */
+    uint16_t pad1;
+} __attribute__((packed)) tss_t;
+
+static struct gdt_entry gdt[6];
+static struct gdt_ptr   gdtp;
+static tss_t            tss;
+uint8_t                 tss_stack[4096];  /* kernel stack for ISR when coming from ring 3 */
+
+static void gdt_set_entry(int i, uint32_t base, uint32_t limit,
+                           uint8_t access, uint8_t gran)
+{
+    gdt[i].base_low   = (uint16_t)(base & 0xFFFF);
+    gdt[i].base_mid   = (uint8_t)((base >> 16) & 0xFF);
+    gdt[i].base_high  = (uint8_t)((base >> 24) & 0xFF);
+    gdt[i].limit_low  = (uint16_t)(limit & 0xFFFF);
+    gdt[i].granularity = (uint8_t)(((limit >> 16) & 0x0F) | (gran & 0xF0));
+    gdt[i].access     = access;
+}
+
+void gdt_init(void)
+{
+    /* [0x00] null descriptor */
+    gdt_set_entry(0, 0, 0, 0, 0);
+    /* [0x08] ring-0 code: base=0, limit=4GB, DPL=0, 32-bit, code R/X */
+    gdt_set_entry(1, 0, 0xFFFFF, 0x9A, 0xCF);
+    /* [0x10] ring-0 data: base=0, limit=4GB, DPL=0, 32-bit, data R/W */
+    gdt_set_entry(2, 0, 0xFFFFF, 0x92, 0xCF);
+    /* [0x18] ring-3 code: base=0, limit=4GB, DPL=3, 32-bit, code R/X */
+    gdt_set_entry(3, 0, 0xFFFFF, 0xFA, 0xCF);
+    /* [0x20] ring-3 data: base=0, limit=4GB, DPL=3, 32-bit, data R/W */
+    gdt_set_entry(4, 0, 0xFFFFF, 0xF2, 0xCF);
+    /* [0x28] TSS descriptor: type=0x89 (32-bit available TSS), DPL=0 */
+    {
+        uint32_t tss_base  = (uint32_t)&tss;
+        uint32_t tss_limit = sizeof(tss) - 1;
+        gdt[5].base_low   = (uint16_t)(tss_base & 0xFFFF);
+        gdt[5].base_mid   = (uint8_t)((tss_base >> 16) & 0xFF);
+        gdt[5].base_high  = (uint8_t)((tss_base >> 24) & 0xFF);
+        gdt[5].limit_low  = (uint16_t)(tss_limit & 0xFFFF);
+        gdt[5].granularity = (uint8_t)((tss_limit >> 16) & 0x0F);
+        gdt[5].access     = 0x89;  /* present, DPL=0, type=9 (32-bit TSS available) */
+    }
+
+    /* Zero TSS, then configure */
+    {
+        uint8_t *p = (uint8_t *)&tss;
+        for (unsigned int k = 0; k < sizeof(tss); k++) p[k] = 0;
+    }
+    tss.ss0         = 0x10;          /* ring-0 data selector */
+    tss.esp0        = (uint32_t)tss_stack + sizeof(tss_stack);
+    tss.iopb_offset = (uint16_t)sizeof(tss);
+
+    gdtp.limit = sizeof(gdt) - 1;
+    gdtp.base  = (uint32_t)&gdt;
+
+    __asm__ volatile (
+        "lgdt %0\n"
+        /* Reload segment registers to use new GDT.
+         * CS is reloaded via a far jump; data segments via mov. */
+        "ljmp $0x08, $1f\n"
+        "1:\n"
+        "mov $0x10, %%ax\n"
+        "mov %%ax, %%ds\n"
+        "mov %%ax, %%es\n"
+        "mov %%ax, %%fs\n"
+        "mov %%ax, %%gs\n"
+        "mov %%ax, %%ss\n"
+        : : "m"(gdtp) : "eax"
+    );
+
+    /* Load Task Register */
+    __asm__ volatile ("ltr %%ax" : : "a"((uint16_t)0x28));
+}
+
+void tss_set_ring0_stack(uint32_t esp)
+{
+    tss.esp0 = esp;
+}
+
 
 /* ============================================================
  * IDT structures

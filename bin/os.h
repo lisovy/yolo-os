@@ -36,7 +36,7 @@
 #define KEY_RIGHT 0x83
 
 /* Program argument string — written by kernel before exec_run() */
-#define ARGS_BASE 0x3FF800
+#define ARGS_BASE 0x7FC000
 static inline const char *get_args(void) { return (const char *)ARGS_BASE; }
 
 /* Raw syscall — up to 3 arguments */

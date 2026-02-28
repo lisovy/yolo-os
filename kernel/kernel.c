@@ -840,6 +840,27 @@ static const char *exception_name(unsigned int n)
 void isr_handler(struct registers *r)
 {
     if (r->int_no < 32) {
+        /* Page fault from user space: deliver segfault and return to shell */
+        if (r->int_no == 14 && (r->err_code & 0x04) && exec_ret_esp != 0) {
+            vga_print("\nSegmentation fault\n", COLOR_DEFAULT);
+            serial_print("[exec] Segmentation fault\n");
+            g_exit_code = 139;
+            /* Restore kernel stack saved by exec_run() and return to
+             * program_exec() via exec_run_return label.
+             * Stack at exec_ret_esp: edi, esi, ebx, ebp, retaddr. */
+            __asm__ volatile (
+                "mov %0, %%esp\n"
+                "pop %%edi\n"
+                "pop %%esi\n"
+                "pop %%ebx\n"
+                "pop %%ebp\n"
+                "sti\n"
+                "ret\n"
+                :
+                : "r"(exec_ret_esp)
+            );
+        }
+
         /* CPU exception — print panic screen and halt */
         vga_print("\n\n *** KERNEL PANIC: ", COLOR_ERR);
         vga_print(exception_name(r->int_no), COLOR_ERR);
@@ -865,6 +886,7 @@ void isr_handler(struct registers *r)
 }
 
 extern void idt_init(void);
+extern void gdt_init(void);
 extern int  fat16_init(void);
 extern int  fat16_listdir(void (*cb)(const char *name, unsigned int size));
 
@@ -887,11 +909,55 @@ static unsigned int parse_uint(const unsigned char *s, int len)
 
 #define PROG_BASE     0x400000
 #define PROG_MAX_SIZE (256 * 1024)  /* 256 KB */
-#define ARGS_BASE     0x3FF800      /* args string written here before exec_run() */
+#define ARGS_BASE     0x7FC000      /* args string written here before exec_run() */
 #define ARGS_MAX      200
+#define USER_STACK_TOP 0x7FF000     /* user stack top (grows down) */
 
-extern void         exec_run(void);
+extern void         exec_run(unsigned int entry, unsigned int user_stack_top);
 extern unsigned int exec_ret_esp;
+
+/* ============================================================
+ * Paging setup — identity map with U/S protection
+ * ============================================================ */
+
+static unsigned int page_dir[1024]  __attribute__((aligned(4096)));
+static unsigned int pt_kernel[1024] __attribute__((aligned(4096)));  /* 0–4 MB, U=0 */
+static unsigned int pt_user[1024]   __attribute__((aligned(4096)));  /* 4–8 MB, U=1 */
+
+static void paging_init(void)
+{
+    int i;
+
+    /* Kernel page table: identity map 0–4MB, supervisor only (bits P+RW, U=0) */
+    for (i = 0; i < 1024; i++)
+        pt_kernel[i] = (unsigned int)(i << 12) | 0x03;   /* P + RW */
+
+    /* VGA framebuffer pages 0xA0000–0xBFFFF in kernel PT need U=1 so the
+     * demo program can access them from ring 3.
+     * Page indices for 0xA0000–0xBFFFF: 0xA0..0xBF */
+    for (i = 0xA0; i <= 0xBF; i++)
+        pt_kernel[i] = (unsigned int)(i << 12) | 0x07;   /* P + RW + U */
+
+    /* User page table: identity map 4–8MB, user accessible (P+RW+U) */
+    for (i = 0; i < 1024; i++)
+        pt_user[i] = (unsigned int)(0x400000 + (i << 12)) | 0x07;  /* P + RW + U */
+
+    /* Page directory: first two 4-MB windows */
+    for (i = 0; i < 1024; i++)
+        page_dir[i] = 0;
+
+    page_dir[0] = (unsigned int)pt_kernel | 0x03;   /* kernel: supervisor */
+    page_dir[1] = (unsigned int)pt_user   | 0x07;   /* user:   user-accessible */
+
+    /* Load CR3 and enable paging in CR0 */
+    __asm__ volatile (
+        "mov %0, %%cr3\n"
+        "mov %%cr0, %%eax\n"
+        "or $0x80000000, %%eax\n"
+        "mov %%eax, %%cr0\n"
+        : : "r"(page_dir) : "eax"
+    );
+}
 
 /* Returns pointer past prefix if s starts with prefix, else NULL. */
 static const char *str_strip_prefix(const char *s, const char *prefix)
@@ -947,7 +1013,12 @@ static void program_exec(const char *filename, const char *args)
     while (args[ai] && ai < ARGS_MAX - 1) { dst[ai] = args[ai]; ai++; }
     dst[ai] = '\0';
 
-    exec_run();
+    /* Set TSS ring-0 stack so interrupt/syscall from ring 3 lands in kernel */
+    extern void tss_set_ring0_stack(unsigned int esp);
+    extern unsigned char tss_stack[4096];
+    tss_set_ring0_stack((unsigned int)tss_stack + sizeof(tss_stack));
+
+    exec_run(PROG_BASE, USER_STACK_TOP);
 
     /* Detect whether the program switched to a graphics mode by comparing
      * the current GC Miscellaneous register to the saved text-mode value.
@@ -997,6 +1068,12 @@ void kernel_main(void)
 {
     serial_init();
     serial_print("[kernel] started\n");
+
+    paging_init();
+    serial_print("[kernel] paging ready\n");
+
+    gdt_init();
+    serial_print("[kernel] GDT ready\n");
 
     idt_init();
     __asm__ volatile ("sti");
