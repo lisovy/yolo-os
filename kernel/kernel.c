@@ -562,65 +562,6 @@ int ata_write_sector(unsigned int lba, const unsigned short *buf)
  * Status bar (row 24)
  * ============================================================ */
 
-static int last_sec = -1;
-static int colon_on = 1;
-
-static void status_bar_update(void)
-{
-    volatile unsigned short *vga = (volatile unsigned short *)VGA_MEMORY;
-
-    /* Fast path: only redraw when the second changes */
-    if (rtc_read(RTC_REG_STA) & 0x80)
-        return;  /* update in progress, skip */
-
-    unsigned char stb = rtc_read(RTC_REG_STB);
-    int binary = (stb & 0x04) != 0;
-    unsigned char raw_sec = rtc_read(RTC_REG_SEC);
-    int sec = binary ? raw_sec : bcd_to_bin(raw_sec);
-
-    if (sec == last_sec)
-        return;
-
-    colon_on = !colon_on;
-    last_sec = sec;
-
-    /* Read full time */
-    struct rtc_time t;
-    rtc_get_time(&t);
-
-    /* Fill entire status bar row with blue background */
-    unsigned short bg = (COLOR_STATUS_BG << 8) | ' ';
-    for (int col = 0; col < VGA_COLS; col++)
-        vga[STATUS_ROW * VGA_COLS + col] = bg;
-
-    /*
-     * Build date+time string: "DD.MM.YYYY HH:MM" (16 chars)
-     * The colon blinks every second.
-     */
-    char str[16];
-    str[0]  = (char)('0' + t.day  / 10);
-    str[1]  = (char)('0' + t.day  % 10);
-    str[2]  = '.';
-    str[3]  = (char)('0' + t.mon  / 10);
-    str[4]  = (char)('0' + t.mon  % 10);
-    str[5]  = '.';
-    str[6]  = (char)('0' + t.year / 1000);
-    str[7]  = (char)('0' + (t.year / 100) % 10);
-    str[8]  = (char)('0' + (t.year / 10)  % 10);
-    str[9]  = (char)('0' + t.year % 10);
-    str[10] = ' ';
-    str[11] = (char)('0' + t.hour / 10);
-    str[12] = (char)('0' + t.hour % 10);
-    str[13] = colon_on ? ':' : ' ';
-    str[14] = (char)('0' + t.min / 10);
-    str[15] = (char)('0' + t.min % 10);
-
-    /* Write right-aligned at columns 64..79 */
-    int start = VGA_COLS - 16;
-    for (int i = 0; i < 16; i++)
-        vga[STATUS_ROW * VGA_COLS + start + i] =
-            (COLOR_STATUS_TIME << 8) | (unsigned char)str[i];
-}
 
 /* ============================================================
  * Kernel entry point
@@ -1088,8 +1029,6 @@ void kernel_main(void)
     int prompt_row = cursor_row;
 
     for (;;) {
-        status_bar_update();
-
         int c = (unsigned char)kbd_getchar();
         if (!c) continue;
 
