@@ -94,7 +94,7 @@ def make_disk_layout():
 # ── physical-layout.png ───────────────────────────────────────────────────────
 
 def make_physical_layout():
-    W, H = 700, 730
+    W, H = 700, 754
     img = Image.new("RGB", (W, H), "#f5f5f5")
     draw = ImageDraw.Draw(img)
 
@@ -122,16 +122,16 @@ def make_physical_layout():
         text_center(draw, (LX+RX)//2, y + 18, text, fh, color)
 
     # ── kernel / hardware (static) ────────────────────────────────────────────
-    section_header(56, "Kernel + hardware  (0x000000 – 0x0FFFFF, static)", "#424242")
+    section_header(62, "Kernel + hardware  (0x000000 – 0x0FFFFF, static)", "#424242")
 
     kern_rows = [
-        (76,  38, "#9e9e9e", "#616161", "IVT / BIOS data",          "0x00000",  "ring 0",   "#b71c1c"),
-        (120, 38, "#9e9e9e", "#616161", "MBR bootloader  (512 B)",   "0x07C00",  "ring 0",   "#b71c1c"),
-        (164, 50, "#29b6f6", "#0277bd", "Kernel  (~16 KB)",          "0x10000",  "ring 0",   "#b71c1c"),
-        (220, 34, "#e0e0e0", "#bdbdbd", "free RAM",                  "0x14000",  "ring 0",   "#b71c1c"),
-        (260, 38, "#ef6c00", "#bf360c", "Kernel stack  (grows ↓)",   "0x90000",  "ring 0",   "#b71c1c"),
-        (304, 34, "#6d4c41", "#4e342e", "VGA graphics  (Mode 13h)",  "0xA0000",  "ring 0+3", "#1b5e20"),
-        (344, 34, "#6d4c41", "#4e342e", "VGA text framebuffer",      "0xB8000",  "ring 0+3", "#1b5e20"),
+        (100, 38, "#9e9e9e", "#616161", "IVT / BIOS data",          "0x00000",  "ring 0",   "#b71c1c"),
+        (144, 38, "#9e9e9e", "#616161", "MBR bootloader  (512 B)",   "0x07C00",  "ring 0",   "#b71c1c"),
+        (188, 50, "#29b6f6", "#0277bd", "Kernel  (~16 KB)",          "0x10000",  "ring 0",   "#b71c1c"),
+        (244, 34, "#e0e0e0", "#bdbdbd", "free RAM",                  "0x14000",  "ring 0",   "#b71c1c"),
+        (284, 38, "#ef6c00", "#bf360c", "Kernel stack  (grows ↓)",   "0x90000",  "ring 0",   "#b71c1c"),
+        (328, 34, "#6d4c41", "#4e342e", "VGA graphics  (Mode 13h)",  "0xA0000",  "ring 0+3", "#1b5e20"),
+        (368, 34, "#6d4c41", "#4e342e", "VGA text framebuffer",      "0xB8000",  "ring 0+3", "#1b5e20"),
     ]
     for (y, h, fill, outline, title, addr, ring_txt, ring_color) in kern_rows:
         draw_block(draw, LX, y, RX, y+h, fill, outline, title, "", fb, fs)
@@ -139,7 +139,7 @@ def make_physical_layout():
         ring_label(y + h//2 - 4, ring_txt, ring_color)
 
     # ── PMM dynamic region ────────────────────────────────────────────────────
-    PM_Y = 400
+    PM_Y = 424
     section_header(PM_Y - 8,
         "PMM dynamic  (0x100000 – 0x7FFFFFFF  ·  ~127 MB  ·  32 512 frames)",
         "#00695c")
@@ -176,21 +176,21 @@ def make_physical_layout():
 # ── virtual-layout.png ────────────────────────────────────────────────────────
 
 def make_virtual_layout():
-    W, H = 620, 430
+    W, H = 720, 430
     img = Image.new("RGB", (W, H), "#f5f5f5")
     draw = ImageDraw.Draw(img)
 
     fb  = load_font(17)
     fs  = load_font_regular(14)
-    ft  = load_font(24)
+    ft  = load_font(20)
     fl  = load_font_regular(13)
 
     text_center(draw, W // 2, 30,
                 "Virtual address space  (per process, all link at 0x400000)", ft, "#222")
 
-    LX   = 180
-    RX   = 500
-    LADDR = 168
+    LX   = 210
+    RX   = 530
+    LADDR = 198
 
     def addr_label(y, text):
         bbox = draw.textbbox((0, 0), text, font=fl)
