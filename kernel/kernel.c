@@ -804,12 +804,6 @@ static unsigned int g_exit_code;   /* set by SYS_EXIT, returned by SYS_EXEC */
 #define ARGS_MAX       200
 #define USER_STACK_TOP 0x7FF000
 
-/* High-memory kernel virtual addresses for loading binaries */
-#define SHELL_LOAD_VIRT  0x800000u
-#define SHELL_ARGS_KERN  0xBFC000u
-#define CHILD_LOAD_VIRT  0xC00000u
-#define CHILD_ARGS_KERN  0xFFC000u
-
 extern void         exec_run(unsigned int entry, unsigned int user_stack_top);
 extern int            fat16_listdir(void (*cb)(const char *name, unsigned int size, int is_dir));
 extern int            fat16_delete(const char *name);
@@ -819,8 +813,155 @@ extern int            fat16_chdir(const char *name);
 extern unsigned short fat16_get_cwd_cluster(void);
 extern void           fat16_set_cwd_cluster(unsigned short c);
 
-static void switch_to_shell_pagedir(void);
-static void switch_to_child_pagedir(void);
+/* ============================================================
+ * Paging data structures
+ * ============================================================ */
+
+static unsigned int page_dir[1024]   __attribute__((aligned(4096)));
+static unsigned int pt_kernel[1024]  __attribute__((aligned(4096)));  /* 0–4 MB */
+
+/* ============================================================
+ * PMM — physical memory manager
+ * ============================================================ */
+#include "pmm.h"
+
+/* ============================================================
+ * Process Control Block
+ * ============================================================ */
+
+#define PROC_MAX_PROCS  32
+#define PROC_MAX_FRAMES 80   /* 1 PD + 1 PT + 64 bin + 7 stack + 1 kstack = 74 + margin */
+
+typedef enum { PROC_UNUSED=0, PROC_RUNNING, PROC_READY, PROC_ZOMBIE } proc_state_t;
+
+struct process {
+    int            pid;
+    proc_state_t   state;
+
+    unsigned int   cr3;                        /* physical address of page directory */
+    unsigned int   parent_cr3;                 /* physical address of parent page dir */
+
+    unsigned int   phys_frames[PROC_MAX_FRAMES];
+    int            n_frames;
+
+    unsigned int   saved_exec_ret_esp;         /* exec_ret_esp of parent */
+
+    /* Reserved for future preemptive scheduler */
+    unsigned int   phys_kstack;
+    unsigned int   saved_esp;
+
+    int            exit_code;
+};
+
+static struct process  g_procs[PROC_MAX_PROCS];
+static struct process *g_current = 0;
+
+static void proc_track_frame(struct process *p, unsigned int pa)
+{
+    if (p->n_frames < PROC_MAX_FRAMES)
+        p->phys_frames[p->n_frames++] = pa;
+}
+
+/*
+ * process_create — build a per-process page directory and load the binary.
+ * Must be called while CR3 = page_dir (kernel identity map).
+ *
+ * Virtual layout in PDE[1] (base 0x400000):
+ *   VPN   0..63   binary  (64 × 4 KB = 256 KB)
+ *   VPN 1016..1022 stack  (7 × 4 KB = 28 KB)
+ *   VPN 1020       ARGS_BASE = 0x7FC000  (stack_frames[4])
+ */
+static struct process *process_create(const char *name, const char *args)
+{
+    int i, slot = -1;
+    for (i = 0; i < PROC_MAX_PROCS; i++) {
+        if (g_procs[i].state == PROC_UNUSED) { slot = i; break; }
+    }
+    if (slot < 0) return 0;
+
+    struct process *p = &g_procs[slot];
+    p->n_frames = 0;
+    p->pid      = slot + 1;
+
+    /* Allocate page directory frame */
+    unsigned int pd_phys = pmm_alloc();
+    if (!pd_phys) return 0;
+    proc_track_frame(p, pd_phys);
+    p->cr3 = pd_phys;
+
+    /* Allocate user page table frame */
+    unsigned int pt_phys = pmm_alloc();
+    if (!pt_phys) goto fail;
+    proc_track_frame(p, pt_phys);
+
+    /* Allocate 64 contiguous frames for the binary (256 KB) */
+    unsigned int bin_phys = pmm_alloc_contiguous(64);
+    if (!bin_phys) goto fail;
+    for (i = 0; i < 64; i++) proc_track_frame(p, bin_phys + (unsigned int)i * 0x1000);
+
+    /* Allocate 7 frames for user stack (VPN 1016..1022) */
+    unsigned int stack_frames[7];
+    for (i = 0; i < 7; i++) {
+        stack_frames[i] = pmm_alloc();
+        if (!stack_frames[i]) goto fail;
+        proc_track_frame(p, stack_frames[i]);
+    }
+    /* VPN 1020 = ARGS_BASE: stack_frames[4] (1020 - 1016 = 4) */
+    unsigned int args_phys = stack_frames[4];
+
+    /* Allocate kernel stack frame */
+    unsigned int kstack_phys = pmm_alloc();
+    if (!kstack_phys) goto fail;
+    proc_track_frame(p, kstack_phys);
+    p->phys_kstack = kstack_phys;
+
+    /* Load binary (identity-mapped at bin_phys in kernel page_dir) */
+    int n = fat16_read_from_bin(name, (unsigned char *)bin_phys, PROG_MAX_SIZE);
+    if (n <= 0) goto fail;
+
+    /* Copy args to args page (identity-mapped) */
+    char *dst = (char *)args_phys;
+    for (i = 0; i < ARGS_MAX - 1 && args[i]; i++) dst[i] = args[i];
+    dst[i] = '\0';
+
+    /* Build user page table */
+    unsigned int *pt = (unsigned int *)pt_phys;
+    for (i = 0; i < 1024; i++) pt[i] = 0;
+
+    for (i = 0; i < 64; i++)
+        pt[i] = (bin_phys + (unsigned int)i * 0x1000) | 0x07;  /* P+RW+U */
+
+    for (i = 0; i < 7; i++)
+        pt[1016 + i] = stack_frames[i] | 0x07;  /* P+RW+U */
+
+    /* Build page directory */
+    unsigned int *pd = (unsigned int *)pd_phys;
+    for (i = 0; i < 1024; i++) pd[i] = 0;
+
+    pd[0] = (unsigned int)pt_kernel | 0x07;  /* shared kernel PT */
+    pd[1] = pt_phys | 0x07;                  /* user PT */
+
+    /* PDE[2]–PDE[511]: 4 MB PSE supervisor-only identity for kernel writes */
+    for (i = 2; i < 512; i++)
+        pd[i] = (unsigned int)(i << 22) | 0x83;  /* P+RW+PS, U=0 */
+
+    p->state = PROC_READY;
+    return p;
+
+fail:
+    for (i = 0; i < p->n_frames; i++) pmm_free(p->phys_frames[i]);
+    p->n_frames = 0;
+    p->state    = PROC_UNUSED;
+    return 0;
+}
+
+static void process_destroy(struct process *p)
+{
+    int i;
+    for (i = 0; i < p->n_frames; i++) pmm_free(p->phys_frames[i]);
+    p->n_frames = 0;
+    p->state    = PROC_UNUSED;
+}
 
 /* Directory listing buffer used by SYS_READDIR */
 #define LS_MAX_ENTRIES 64
@@ -942,6 +1083,8 @@ static void syscall_dispatch(struct registers *r)
     case SYS_EXEC: {
         char name[13], args[ARGS_MAX];
         int xi;
+
+        /* [A] Copy name/args from parent's user space (current CR3) */
         const char *src_name = (const char *)r->ebx;
         for (xi = 0; xi < 12 && src_name[xi]; xi++) name[xi] = src_name[xi];
         name[xi] = '\0';
@@ -949,40 +1092,55 @@ static void syscall_dispatch(struct registers *r)
         for (xi = 0; xi < ARGS_MAX - 1 && src_args[xi]; xi++) args[xi] = src_args[xi];
         args[xi] = '\0';
 
-        /* Save shell's exec return context and current working directory */
-        unsigned int   saved_exec_ret = exec_ret_esp;
-        unsigned short saved_cwd      = fat16_get_cwd_cluster();
+        unsigned short saved_cwd = fat16_get_cwd_cluster();
 
-        /* Switch to child page directory and load binary */
-        switch_to_child_pagedir();
-        int xn = fat16_read_from_bin(name, (unsigned char *)CHILD_LOAD_VIRT, PROG_MAX_SIZE);
-        if (xn <= 0) {
-            switch_to_shell_pagedir();
-            exec_ret_esp = saved_exec_ret;
+        /* [B] Switch to kernel page_dir (identity map needed for process_create) */
+        __asm__ volatile("mov %0, %%cr3" :: "r"(page_dir) : "memory");
+
+        /* [C] Create child process (loads binary + builds page tables) */
+        struct process *child = process_create(name, args);
+        if (!child) {
+            unsigned int par_cr3c = g_current ? g_current->cr3 : (unsigned int)page_dir;
+            __asm__ volatile("mov %0, %%cr3" :: "r"(par_cr3c) : "memory");
+            fat16_set_cwd_cluster(saved_cwd);
             r->eax = (unsigned int)-1;
             break;
         }
 
-        /* Copy args to child's ARGS_BASE (kernel virt 0xFFC000 = phys 0xFFC000) */
-        char *dst = (char *)CHILD_ARGS_KERN;
-        for (xi = 0; xi < ARGS_MAX - 1 && args[xi]; xi++) dst[xi] = args[xi];
-        dst[xi] = '\0';
+        /* [D] Record parent context in child PCB */
+        child->parent_cr3         = g_current ? g_current->cr3 : (unsigned int)page_dir;
+        child->saved_exec_ret_esp = exec_ret_esp;
+        child->state              = PROC_RUNNING;
+        struct process *parent    = g_current;
+        g_current                 = child;
+        g_exit_code               = 0;
 
-        g_exit_code = 0;
+        /* [E] Switch to child page directory and run */
+        __asm__ volatile("mov %0, %%cr3" :: "r"(child->cr3) : "memory");
         exec_run(PROG_BASE, USER_STACK_TOP);
 
-        /* Child returned — detect and restore VGA if it switched to graphics */
+        /* [F] Child finished — restore parent context */
+        exec_ret_esp         = child->saved_exec_ret_esp;
+        unsigned int par_cr3 = child->parent_cr3;
+        int          ecode   = g_exit_code;
+
+        /* [G] Cleanup: switch to kernel page_dir, destroy child, restore g_current */
+        __asm__ volatile("mov %0, %%cr3" :: "r"(page_dir) : "memory");
+        process_destroy(child);
+        g_current = parent;
+
+        /* [H] Restore VGA text mode, cwd, then switch to parent page_dir */
         outb(0x3CE, 0x06);
-        int xgfx = (inb(0x3CF) != saved_text_regs.gc[6]);
-        vga_restore_textmode();
-        if (xgfx) vga_clear();
-
-        /* Switch back to shell page directory and restore exec context + cwd */
-        switch_to_shell_pagedir();
+        if (inb(0x3CF) != saved_text_regs.gc[6]) {
+            vga_restore_textmode();
+            vga_clear();
+        } else {
+            vga_restore_textmode();
+        }
         fat16_set_cwd_cluster(saved_cwd);
-        exec_ret_esp = saved_exec_ret;
+        __asm__ volatile("mov %0, %%cr3" :: "r"(par_cr3) : "memory");
 
-        r->eax = (unsigned int)g_exit_code;
+        r->eax = (unsigned int)ecode;
         break;
     }
     default:
@@ -1080,70 +1238,37 @@ static unsigned int parse_uint(const unsigned char *s, int len)
     return n;
 }
 
-/* ============================================================
- * Paging setup — identity map with U/S protection
- * ============================================================ */
-
-static unsigned int page_dir[1024]       __attribute__((aligned(4096)));
-static unsigned int pt_kernel[1024]      __attribute__((aligned(4096)));  /* 0–4 MB, U=0 */
-static unsigned int pt_user[1024]        __attribute__((aligned(4096)));  /* 4–8 MB, U=1 */
-static unsigned int pt_kern_high0[1024]  __attribute__((aligned(4096)));  /* 8–12 MB, U=0 */
-static unsigned int pt_kern_high1[1024]  __attribute__((aligned(4096)));  /* 12–16 MB, U=0 */
-static unsigned int page_dir_shell[1024] __attribute__((aligned(4096)));
-static unsigned int pt_user_shell[1024]  __attribute__((aligned(4096)));  /* virt 4–8MB → phys 8–12MB */
-static unsigned int page_dir_child[1024] __attribute__((aligned(4096)));
-static unsigned int pt_user_child[1024]  __attribute__((aligned(4096)));  /* virt 4–8MB → phys 12–16MB */
-
 static void paging_init(void)
 {
     int i;
 
-    /* Kernel page table: identity map 0–4MB, supervisor only (bits P+RW, U=0) */
+    /* Kernel page table: identity map 0–4MB, supervisor only */
     for (i = 0; i < 1024; i++)
         pt_kernel[i] = (unsigned int)(i << 12) | 0x03;   /* P + RW */
 
-    /* VGA framebuffer pages 0xA0000–0xBFFFF in kernel PT need U=1 so the
-     * demo program can access them from ring 3.
-     * Page indices for 0xA0000–0xBFFFF: 0xA0..0xBF */
+    /* VGA framebuffers 0xA0000–0xBFFFF need U=1 for ring-3 demo program */
     for (i = 0xA0; i <= 0xBF; i++)
         pt_kernel[i] = (unsigned int)(i << 12) | 0x07;   /* P + RW + U */
 
-    /* User page table: identity map 4–8MB, user accessible (P+RW+U) */
-    for (i = 0; i < 1024; i++)
-        pt_user[i] = (unsigned int)(0x400000 + (i << 12)) | 0x07;  /* P + RW + U */
+    /* Enable PSE (4-MB pages) in CR4 */
+    __asm__ volatile (
+        "mov %%cr4, %%eax\n"
+        "or $0x10, %%eax\n"
+        "mov %%eax, %%cr4\n"
+        ::: "eax"
+    );
 
-    /* Page directory: first two 4-MB windows */
-    for (i = 0; i < 1024; i++)
-        page_dir[i] = 0;
+    /* Kernel page directory */
+    for (i = 0; i < 1024; i++) page_dir[i] = 0;
 
-    page_dir[0] = (unsigned int)pt_kernel | 0x07;   /* U=1 in PDE; individual PTEs enforce S/U */
-    page_dir[1] = (unsigned int)pt_user   | 0x07;   /* user:   user-accessible */
+    page_dir[0] = (unsigned int)pt_kernel | 0x07;   /* 4KB pages, 0–4MB */
 
-    /* Kernel high mappings (supervisor-only, identity): used to load binaries */
-    for (i = 0; i < 1024; i++) {
-        pt_kern_high0[i] = (unsigned int)(0x800000 + (i << 12)) | 0x03;  /* P+RW, U=0 */
-        pt_kern_high1[i] = (unsigned int)(0xC00000 + (i << 12)) | 0x03;
-    }
-    page_dir[2] = (unsigned int)pt_kern_high0 | 0x03;  /* virtual 0x800000–0xBFFFFF */
-    page_dir[3] = (unsigned int)pt_kern_high1 | 0x03;  /* virtual 0xC00000–0xFFFFFF */
+    /* PDE[1]–PDE[511]: 4 MB large pages, supervisor-only identity map
+     * covering 4 MB–2 GB so kernel can write to any physical frame */
+    for (i = 1; i < 512; i++)
+        page_dir[i] = (unsigned int)(i << 22) | 0x83;   /* P+RW+PS, U=0 */
 
-    /* Shell page directory: virtual 0x400000 → physical 0x800000 (U=1) */
-    for (i = 0; i < 1024; i++)
-        pt_user_shell[i] = (unsigned int)(0x800000 + (i << 12)) | 0x07;
-    page_dir_shell[0] = (unsigned int)pt_kernel     | 0x07;
-    page_dir_shell[1] = (unsigned int)pt_user_shell | 0x07;
-    page_dir_shell[2] = (unsigned int)pt_kern_high0 | 0x03;
-    page_dir_shell[3] = (unsigned int)pt_kern_high1 | 0x03;
-
-    /* Child page directory: virtual 0x400000 → physical 0xC00000 (U=1) */
-    for (i = 0; i < 1024; i++)
-        pt_user_child[i] = (unsigned int)(0xC00000 + (i << 12)) | 0x07;
-    page_dir_child[0] = (unsigned int)pt_kernel     | 0x07;
-    page_dir_child[1] = (unsigned int)pt_user_child | 0x07;
-    page_dir_child[2] = (unsigned int)pt_kern_high0 | 0x03;
-    page_dir_child[3] = (unsigned int)pt_kern_high1 | 0x03;
-
-    /* Load CR3 and enable paging in CR0 */
+    /* Load CR3 and enable paging + PSE in CR0 */
     __asm__ volatile (
         "mov %0, %%cr3\n"
         "mov %%cr0, %%eax\n"
@@ -1151,16 +1276,6 @@ static void paging_init(void)
         "mov %%eax, %%cr0\n"
         : : "r"(page_dir) : "eax"
     );
-}
-
-static void switch_to_shell_pagedir(void)
-{
-    __asm__ volatile("mov %0, %%cr3" :: "r"(page_dir_shell) : "memory");
-}
-
-static void switch_to_child_pagedir(void)
-{
-    __asm__ volatile("mov %0, %%cr3" :: "r"(page_dir_child) : "memory");
 }
 
 /* ============================================================
@@ -1219,16 +1334,21 @@ void kernel_main(void)
 
     serial_print("[kernel] ready\n");
 
-    /* Load shell binary into physical 0x800000 (kernel virtual 0x800000) */
-    int sh_n = fat16_read_from_bin("sh", (unsigned char *)SHELL_LOAD_VIRT, PROG_MAX_SIZE);
-    if (sh_n <= 0) {
+    pmm_init();
+    serial_print("[kernel] PMM ready\n");
+
+    /* Create shell process */
+    struct process *shell = process_create("sh", "");
+    if (!shell) {
         vga_print("FATAL: /bin/sh not found\n", COLOR_ERR);
         for (;;) __asm__ volatile("hlt");
     }
+    g_current    = shell;
+    shell->state = PROC_RUNNING;
     serial_print("[kernel] launching /bin/sh\n");
 
     /* Switch to shell page directory and exec shell at virtual 0x400000 */
-    switch_to_shell_pagedir();
+    __asm__ volatile("mov %0, %%cr3" :: "r"(shell->cr3) : "memory");
     exec_run(PROG_BASE, USER_STACK_TOP);
 
     /* Shell called exit() — unrecoverable */

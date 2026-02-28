@@ -31,7 +31,7 @@ KELF      := $(BUILD)/kernel.elf
 
 # Kernel object files
 KOBJS := $(BUILD)/entry.o $(BUILD)/isr.o $(BUILD)/idt.o \
-         $(BUILD)/kernel.o $(BUILD)/fat16.o
+         $(BUILD)/kernel.o $(BUILD)/fat16.o $(BUILD)/pmm.o
 
 # User programs (flat binaries installed to /bin on FAT16)
 # To add a new program: add its .bin to USER_BINS and write a build rule below.
@@ -169,6 +169,9 @@ $(BUILD)/kernel.o: kernel/kernel.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/fat16.o: kernel/fat16.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/pmm.o: kernel/pmm.c kernel/pmm.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(KELF): $(KOBJS) kernel/linker.ld
