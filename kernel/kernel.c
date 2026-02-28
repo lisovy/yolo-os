@@ -34,6 +34,12 @@
 /* Error color for panic screen */
 #define COLOR_ERR  0x4F   /* white on red */
 
+/* Arrow key codes returned by kbd_getchar() / SYS_GETCHAR */
+#define KEY_UP    0x80
+#define KEY_DOWN  0x81
+#define KEY_LEFT  0x82
+#define KEY_RIGHT 0x83
+
 /* RTC I/O ports and registers */
 #define RTC_INDEX   0x70
 #define RTC_DATA    0x71
@@ -127,8 +133,8 @@ static void vga_clear(void)
     volatile unsigned short *vga = (volatile unsigned short *)VGA_MEMORY;
     unsigned short blank = (COLOR_DEFAULT << 8) | ' ';
 
-    /* Clear only the text area (rows 0 to TEXT_ROWS-1) */
-    for (int i = 0; i < VGA_COLS * TEXT_ROWS; i++)
+    /* Clear entire screen (all VGA_ROWS rows) */
+    for (int i = 0; i < VGA_COLS * VGA_ROWS; i++)
         vga[i] = blank;
 
     cursor_col = 0;
@@ -140,17 +146,17 @@ static void vga_scroll(void)
 {
     volatile unsigned short *vga = (volatile unsigned short *)VGA_MEMORY;
 
-    /* Shift every text row one line up, staying within TEXT_ROWS */
-    for (int row = 0; row < TEXT_ROWS - 1; row++)
+    /* Shift every row one line up across the full screen */
+    for (int row = 0; row < VGA_ROWS - 1; row++)
         for (int col = 0; col < VGA_COLS; col++)
             vga[row * VGA_COLS + col] = vga[(row + 1) * VGA_COLS + col];
 
-    /* Clear the last text row */
+    /* Clear the last row */
     unsigned short blank = (COLOR_DEFAULT << 8) | ' ';
     for (int col = 0; col < VGA_COLS; col++)
-        vga[(TEXT_ROWS - 1) * VGA_COLS + col] = blank;
+        vga[(VGA_ROWS - 1) * VGA_COLS + col] = blank;
 
-    cursor_row = TEXT_ROWS - 1;
+    cursor_row = VGA_ROWS - 1;
 }
 
 static void vga_putchar(char c, unsigned char color)
@@ -184,7 +190,7 @@ static void vga_putchar(char c, unsigned char color)
         }
     }
 
-    if (cursor_row >= TEXT_ROWS)
+    if (cursor_row >= VGA_ROWS)
         vga_scroll();
     vga_update_hw_cursor();
 }
@@ -227,10 +233,12 @@ static const char scancode_map_shift[] = {
 #define SCANCODE_MAP_SIZE  ((int)(sizeof(scancode_map) / sizeof(scancode_map[0])))
 
 static int shift_pressed = 0;
+static int e0_seen = 0;   /* set when 0xE0 prefix byte is received */
 
 /*
  * Non-blocking: returns 0 immediately if no key is ready.
- * Tracks Shift state; returns 0 for non-ASCII keys.
+ * Tracks Shift state; handles 0xE0-prefixed extended keys (arrows).
+ * Returns KEY_UP/DOWN/LEFT/RIGHT for arrow keys, ASCII for others.
  */
 static char kbd_getchar(void)
 {
@@ -239,11 +247,29 @@ static char kbd_getchar(void)
 
     unsigned char sc = inb(KBD_DATA);
 
+    if (sc == 0xE0) {
+        e0_seen = 1;
+        return 0;
+    }
+
     if (sc & 0x80) {
+        /* key-release: clear any E0 state and update shift */
         unsigned char make = sc & 0x7F;
         if (make == SC_LSHIFT || make == SC_RSHIFT)
             shift_pressed = 0;
+        e0_seen = 0;
         return 0;
+    }
+
+    if (e0_seen) {
+        e0_seen = 0;
+        switch (sc) {
+        case 0x48: return KEY_UP;
+        case 0x50: return KEY_DOWN;
+        case 0x4B: return KEY_LEFT;
+        case 0x4D: return KEY_RIGHT;
+        default:   return 0;
+        }
     }
 
     if (sc == SC_LSHIFT || sc == SC_RSHIFT) {
@@ -699,7 +725,7 @@ static void syscall_dispatch(struct registers *r)
         int row = (int)r->ebx;
         int col = (int)r->ecx;
         if (row < 0) row = 0;
-        if (row >= TEXT_ROWS) row = TEXT_ROWS - 1;
+        if (row >= VGA_ROWS) row = VGA_ROWS - 1;
         if (col < 0) col = 0;
         if (col >= VGA_COLS) col = VGA_COLS - 1;
         cursor_row = row;

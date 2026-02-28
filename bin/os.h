@@ -28,6 +28,12 @@
 #define SYS_SETPOS   6
 #define SYS_CLRSCR   7
 
+/* Arrow key codes returned by get_char() */
+#define KEY_UP    0x80
+#define KEY_DOWN  0x81
+#define KEY_LEFT  0x82
+#define KEY_RIGHT 0x83
+
 /* Program argument string — written by kernel before exec_run() */
 #define ARGS_BASE 0x3FF800
 static inline const char *get_args(void) { return (const char *)ARGS_BASE; }

@@ -2,19 +2,18 @@
  *
  * Usage:    run vi <file>
  * Modes:    Normal (default)  |  Insert (i)  |  Command (:)
- * Movement: h j k l
+ * Movement: arrow keys
  * Commands: :w   save
  *           :q   quit (refuses if unsaved)
  *           :q!  force quit
  *           :wq  save and quit
  *
  * Screen layout:
- *   rows  0-22  text content   (EDIT_ROWS = 23 visible lines)
- *   row   23    status / cmd bar
- *   row   24    kernel clock   (not touched)
+ *   rows  0-23  text content   (EDIT_ROWS = 24 visible lines)
+ *   row   24    status / cmd bar
  *
- * Scroll guard: row 23 is written with at most 79 chars so the VGA
- * cursor never wraps to row 24 and triggers vga_scroll().
+ * Scroll guard: row 24 is written with at most 79 chars so the VGA
+ * cursor never wraps to row 25 and triggers vga_scroll().
  *
  * Entry point: user.ld places .text.startup before .text so GCC's
  * main() always lands at 0x400000 regardless of its position here.
@@ -22,7 +21,7 @@
 
 #include "os.h"
 
-#define EDIT_ROWS  23
+#define EDIT_ROWS  24
 #define LNUM_W      6       /* 4-digit number + 2 spaces */
 #define EDIT_COLS  (80 - LNUM_W)
 
@@ -182,7 +181,7 @@ static void redraw(void)
         }
     }
 
-    set_pos(23, 0);
+    set_pos(24, 0);
     write(STDOUT, st, sp);
 
     /* place hardware cursor at edit position */
@@ -253,8 +252,16 @@ void main(void)
         int c = get_char();
         msg[0] = '\0';
 
+        /* Arrow keys work in normal and insert mode (not command) */
+        if (mode != MODE_COMMAND &&
+            (c == KEY_UP || c == KEY_DOWN || c == KEY_LEFT || c == KEY_RIGHT)) {
+            if      (c == KEY_UP)   { if (cy > 0)          { cy--; clamp_cx(); } }
+            else if (c == KEY_DOWN) { if (cy < nlines - 1) { cy++; clamp_cx(); } }
+            else if (c == KEY_LEFT) { if (cx > 0) cx--; }
+            else                    { int m = llen(cy); if (cx < m) cx++; }
+
         /* ---- NORMAL ---- */
-        if (mode == MODE_NORMAL) {
+        } else if (mode == MODE_NORMAL) {
             switch ((char)c) {
             case 'i': mode = MODE_INSERT; break;
             case 'o': {
@@ -264,10 +271,6 @@ void main(void)
                 mode = MODE_INSERT;
                 break;
             }
-            case 'h': if (cx > 0) cx--; break;
-            case 'l': { int m = llen(cy); if (cx < m) cx++; break; }
-            case 'j': if (cy < nlines - 1) { cy++; clamp_cx(); } break;
-            case 'k': if (cy > 0)          { cy--; clamp_cx(); } break;
             case 'x': {
                 /* delete char under cursor (not the newline) */
                 int pos = lines[cy] + cx;
