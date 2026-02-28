@@ -47,7 +47,7 @@ $(BUILD):
 
 # --- User programs ----------------------------------------------------
 
-$(BUILD)/hello.o: bin/hello.c | $(BUILD)
+$(BUILD)/hello.o: bin/hello.c bin/os.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/hello.elf: $(BUILD)/hello.o bin/user.ld
@@ -56,7 +56,7 @@ $(BUILD)/hello.elf: $(BUILD)/hello.o bin/user.ld
 $(BUILD)/hello.bin: $(BUILD)/hello.elf
 	$(OBJCPY) -O binary $< $@
 
-$(BUILD)/xxd.o: bin/xxd.c | $(BUILD)
+$(BUILD)/xxd.o: bin/xxd.c bin/os.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/xxd.elf: $(BUILD)/xxd.o bin/user.ld
@@ -65,7 +65,7 @@ $(BUILD)/xxd.elf: $(BUILD)/xxd.o bin/user.ld
 $(BUILD)/xxd.bin: $(BUILD)/xxd.elf
 	$(OBJCPY) -O binary $< $@
 
-$(BUILD)/vi.o: bin/vi.c | $(BUILD)
+$(BUILD)/vi.o: bin/vi.c bin/os.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/vi.elf: $(BUILD)/vi.o bin/user.ld
@@ -74,7 +74,7 @@ $(BUILD)/vi.elf: $(BUILD)/vi.o bin/user.ld
 $(BUILD)/vi.bin: $(BUILD)/vi.elf
 	$(OBJCPY) -O binary $< $@
 
-$(BUILD)/demo.o: bin/demo.c | $(BUILD)
+$(BUILD)/demo.o: bin/demo.c bin/os.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/demo.elf: $(BUILD)/demo.o bin/user.ld
