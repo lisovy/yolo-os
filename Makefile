@@ -38,7 +38,7 @@ KOBJS := $(BUILD)/entry.o $(BUILD)/isr.o $(BUILD)/idt.o \
 USER_BINS := $(BUILD)/sh.bin $(BUILD)/hello.bin $(BUILD)/xxd.bin $(BUILD)/vi.bin \
              $(BUILD)/demo.bin $(BUILD)/segfault.bin \
              $(BUILD)/ls.bin $(BUILD)/rm.bin $(BUILD)/mkdir.bin $(BUILD)/mv.bin \
-             $(BUILD)/panic.bin
+             $(BUILD)/panic.bin $(BUILD)/free.bin
 
 # ======================================================================
 .PHONY: all run clean newdisk test
@@ -147,6 +147,15 @@ $(BUILD)/panic.elf: $(BUILD)/panic.o bin/user.ld
 	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
 
 $(BUILD)/panic.bin: $(BUILD)/panic.elf
+	$(OBJCPY) -O binary $< $@
+
+$(BUILD)/free.o: bin/free.c bin/os.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/free.elf: $(BUILD)/free.o bin/user.ld
+	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
+
+$(BUILD)/free.bin: $(BUILD)/free.elf
 	$(OBJCPY) -O binary $< $@
 
 # --- Bootloader -------------------------------------------------------

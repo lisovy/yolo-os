@@ -38,8 +38,19 @@
 #define SYS_CHDIR   14
 #define SYS_GETPOS  15
 #define SYS_PANIC   16
+#define SYS_MEMINFO 17
 
 struct direntry { char name[13]; unsigned int size; int is_dir; };
+
+struct meminfo {
+    unsigned int phys_total_kb;
+    unsigned int phys_used_kb;
+    unsigned int phys_free_kb;
+    unsigned int virt_total_kb;
+    unsigned int virt_used_kb;
+    unsigned int virt_free_kb;
+    int          n_procs;
+};
 
 /* Arrow key codes returned by get_char() */
 #define KEY_UP    0x80
@@ -134,6 +145,8 @@ static inline int getpos(void)
     { return syscall(SYS_GETPOS, 0, 0, 0); }
 static inline void kernel_panic(const char *msg)
     { syscall(SYS_PANIC, (int)msg, 0, 0); }
+static inline int meminfo(struct meminfo *info)
+    { return syscall(SYS_MEMINFO, (int)info, 0, 0); }
 
 /* Direct hardware port I/O (ring 0 only) */
 static inline void outb(unsigned short port, unsigned char val)

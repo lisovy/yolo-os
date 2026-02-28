@@ -100,6 +100,21 @@ unsigned int pmm_alloc_contiguous(int n)
     return 0;
 }
 
+unsigned int pmm_total(void)
+{
+    return PMM_TOTAL_FRAMES;
+}
+
+unsigned int pmm_count_used(void)
+{
+    unsigned int i, used = 0;
+    for (i = 0; i < PMM_BITMAP_WORDS; i++) {
+        unsigned int w = pmm_bitmap[i];
+        while (w) { used++; w &= w - 1; }  /* clear lowest set bit */
+    }
+    return used;
+}
+
 /*
  * Free a single physical frame previously returned by pmm_alloc /
  * pmm_alloc_contiguous.

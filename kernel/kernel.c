@@ -670,6 +670,17 @@ static void panic_screen(const char *msg, struct registers *r)
 #define SYS_CHDIR   14   /* (name_ptr)     → 0/-1                      */
 #define SYS_GETPOS  15   /* ()             → row*256 + col             */
 #define SYS_PANIC   16   /* (msg_ptr)      → does not return           */
+#define SYS_MEMINFO 17   /* (meminfo_ptr)  → 0                         */
+
+struct meminfo {
+    unsigned int phys_total_kb;
+    unsigned int phys_used_kb;
+    unsigned int phys_free_kb;
+    unsigned int virt_total_kb;
+    unsigned int virt_used_kb;
+    unsigned int virt_free_kb;
+    int          n_procs;
+};
 
 struct direntry { char name[13]; unsigned int size; int is_dir; };
 
@@ -1080,6 +1091,34 @@ static void syscall_dispatch(struct registers *r)
         panic_screen((const char *)r->ebx, r);
         for (;;) __asm__ volatile("hlt");
         break;
+    case SYS_MEMINFO: {
+        struct meminfo *info = (struct meminfo *)r->ebx;
+        unsigned int total_frames = pmm_total();
+        unsigned int used_frames  = pmm_count_used();
+        info->phys_total_kb = total_frames * 4;
+        info->phys_used_kb  = used_frames  * 4;
+        info->phys_free_kb  = (total_frames - used_frames) * 4;
+
+        /* Count active processes and their mapped virtual pages */
+        int n_procs = 0;
+        unsigned int virt_used_pages = 0;
+        for (int mi = 0; mi < PROC_MAX_PROCS; mi++) {
+            if (g_procs[mi].state == PROC_UNUSED) continue;
+            n_procs++;
+            /* phys_frames[1] = user page table (identity-mapped in 0–4MB) */
+            if (g_procs[mi].n_frames >= 2) {
+                unsigned int *pt = (unsigned int *)g_procs[mi].phys_frames[1];
+                for (int pj = 0; pj < 1024; pj++)
+                    if (pt[pj] & 0x01) virt_used_pages++;
+            }
+        }
+        info->n_procs       = n_procs;
+        info->virt_total_kb = (unsigned int)(n_procs * 4096); /* 4 MB per proc */
+        info->virt_used_kb  = virt_used_pages * 4;
+        info->virt_free_kb  = info->virt_total_kb - info->virt_used_kb;
+        r->eax = 0;
+        break;
+    }
     case SYS_EXEC: {
         char name[13], args[ARGS_MAX];
         int xi;
