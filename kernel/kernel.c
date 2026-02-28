@@ -976,24 +976,67 @@ static const char *str_strip_prefix(const char *s, const char *prefix)
 /* Current working directory path for display (empty = root). */
 static char cwd_path[64] = "";
 
-static void ls_cb(const char *name, unsigned int size, int is_dir)
+#define LS_MAX_ENTRIES 64
+
+struct ls_entry {
+    char         name[13];
+    unsigned int size;
+    int          is_dir;
+};
+
+static struct ls_entry ls_buf[LS_MAX_ENTRIES];
+static int             ls_count;
+
+static void ls_collect(const char *name, unsigned int size, int is_dir)
 {
-    vga_print(name, COLOR_DEFAULT);
-    if (is_dir) {
-        vga_putchar('/', COLOR_DEFAULT);
-    } else {
-        char sizebuf[12];
-        uint_to_str(size, sizebuf);
-        vga_print("  ", COLOR_DEFAULT);
-        vga_print(sizebuf, COLOR_DEFAULT);
-    }
-    vga_putchar('\n', COLOR_DEFAULT);
+    if (ls_count >= LS_MAX_ENTRIES) return;
+    int i = 0;
+    while (name[i] && i < 12) { ls_buf[ls_count].name[i] = name[i]; i++; }
+    ls_buf[ls_count].name[i] = '\0';
+    ls_buf[ls_count].size   = size;
+    ls_buf[ls_count].is_dir = is_dir;
+    ls_count++;
+}
+
+static int str_lt(const char *a, const char *b)
+{
+    while (*a && *a == *b) { a++; b++; }
+    return (unsigned char)*a < (unsigned char)*b;
 }
 
 static void cmd_ls(void)
 {
-    if (fat16_listdir(ls_cb) < 0)
+    ls_count = 0;
+    if (fat16_listdir(ls_collect) < 0) {
         vga_print("ls: disk error\n", COLOR_DEFAULT);
+        return;
+    }
+
+    /* Bubble sort: directories before files, alphabetical within each group */
+    for (int i = 0; i < ls_count - 1; i++) {
+        for (int j = 0; j < ls_count - 1 - i; j++) {
+            struct ls_entry *a = &ls_buf[j];
+            struct ls_entry *b = &ls_buf[j + 1];
+            int swap = (a->is_dir < b->is_dir) ||
+                       (a->is_dir == b->is_dir && str_lt(b->name, a->name));
+            if (swap) {
+                struct ls_entry tmp = *a; *a = *b; *b = tmp;
+            }
+        }
+    }
+
+    for (int i = 0; i < ls_count; i++) {
+        vga_print(ls_buf[i].name, COLOR_DEFAULT);
+        if (ls_buf[i].is_dir) {
+            vga_putchar('/', COLOR_DEFAULT);
+        } else {
+            char sizebuf[12];
+            uint_to_str(ls_buf[i].size, sizebuf);
+            vga_print("  ", COLOR_DEFAULT);
+            vga_print(sizebuf, COLOR_DEFAULT);
+        }
+        vga_putchar('\n', COLOR_DEFAULT);
+    }
 }
 
 static void cmd_rm(const char *name)
