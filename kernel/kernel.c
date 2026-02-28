@@ -898,6 +898,23 @@ static void program_exec(const char *filename, const char *args)
     serial_print("[exec] exited "); serial_print(exitbuf); serial_putchar('\n');
 }
 
+/* Rewrite the shell command line in-place and move the hardware cursor. */
+static void shell_redraw_line(const char *cmd, int cmd_len, int cursor_pos,
+                               int prompt_col, int prompt_row)
+{
+    volatile unsigned short *vga = (volatile unsigned short *)VGA_MEMORY;
+    for (int i = 0; i < cmd_len; i++)
+        vga[prompt_row * VGA_COLS + prompt_col + i] =
+            (COLOR_DEFAULT << 8) | (unsigned char)cmd[i];
+    /* blank the cell just past the end to erase any deleted char */
+    if (prompt_col + cmd_len < VGA_COLS)
+        vga[prompt_row * VGA_COLS + prompt_col + cmd_len] =
+            (COLOR_DEFAULT << 8) | ' ';
+    cursor_col = prompt_col + cursor_pos;
+    cursor_row = prompt_row;
+    vga_update_hw_cursor();
+}
+
 /* ============================================================
  * Kernel entry point
  * ============================================================ */
@@ -948,27 +965,57 @@ void kernel_main(void)
     vga_print("> ", COLOR_PROMPT);
 
     static char cmd[80];
-    int cmd_len = 0;
+    int cmd_len    = 0;
+    int cursor_pos = 0;   /* insertion point within cmd, 0..cmd_len */
+    int prompt_col = cursor_col;
+    int prompt_row = cursor_row;
 
     for (;;) {
         status_bar_update();
 
-        char c = kbd_getchar();
+        int c = (unsigned char)kbd_getchar();
         if (!c) continue;
 
+        if (c == KEY_LEFT) {
+            if (cursor_pos > 0) {
+                cursor_pos--;
+                cursor_col = prompt_col + cursor_pos;
+                cursor_row = prompt_row;
+                vga_update_hw_cursor();
+            }
+            continue;
+        }
+        if (c == KEY_RIGHT) {
+            if (cursor_pos < cmd_len) {
+                cursor_pos++;
+                cursor_col = prompt_col + cursor_pos;
+                cursor_row = prompt_row;
+                vga_update_hw_cursor();
+            }
+            continue;
+        }
+        if (c == KEY_UP || c == KEY_DOWN)
+            continue;
+
         if (c == '\b') {
-            if (cmd_len > 0) {
+            if (cursor_pos > 0) {
+                for (int i = cursor_pos - 1; i < cmd_len - 1; i++)
+                    cmd[i] = cmd[i + 1];
                 cmd_len--;
-                vga_putchar('\b', COLOR_DEFAULT);
+                cursor_pos--;
+                shell_redraw_line(cmd, cmd_len, cursor_pos, prompt_col, prompt_row);
             }
             continue;
         }
 
-        vga_putchar(c, COLOR_DEFAULT);
-
         if (c == '\n') {
+            /* position cursor at line end before emitting newline */
+            cursor_col = prompt_col + cmd_len;
+            cursor_row = prompt_row;
+            vga_putchar('\n', COLOR_DEFAULT);
             cmd[cmd_len] = '\0';
-            cmd_len = 0;
+            cmd_len    = 0;
+            cursor_pos = 0;
 
             const char *rest = str_strip_prefix(cmd, "run ");
             if (rest && *rest) {
@@ -986,8 +1033,21 @@ void kernel_main(void)
             }
 
             vga_print("> ", COLOR_PROMPT);
-        } else if (cmd_len < (int)sizeof(cmd) - 1) {
-            cmd[cmd_len++] = c;
+            prompt_col = cursor_col;
+            prompt_row = cursor_row;
+            continue;
+        }
+
+        /* printable char: insert at cursor_pos */
+        if ((unsigned char)c >= 0x20 && (unsigned char)c < 0x7F &&
+                cmd_len < (int)sizeof(cmd) - 1 &&
+                prompt_col + cmd_len < VGA_COLS - 1) {
+            for (int i = cmd_len; i > cursor_pos; i--)
+                cmd[i] = cmd[i - 1];
+            cmd[cursor_pos] = (char)c;
+            cmd_len++;
+            cursor_pos++;
+            shell_redraw_line(cmd, cmd_len, cursor_pos, prompt_col, prompt_row);
         }
     }
 }
