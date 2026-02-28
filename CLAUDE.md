@@ -40,7 +40,7 @@ TSS holds a separate 4 KB kernel stack (`tss_stack[]`); `tss.esp0` is updated in
 - PIC 8259 remapped: IRQ 0-7 → INT 32-39, IRQ 8-15 → INT 40-47
 - All IRQs masked (polling used for keyboard and disk)
 - INT 0x80 gate (DPL=3) — fully implemented syscall interface
-- CPU exceptions → kernel panic (red screen + halt)
+- CPU exceptions → kernel panic: full-screen red/yellow display with register dump + halt
 - **#PF from ring 3** → prints "Segmentation fault", exit code 139, returns to shell
 
 ## Paging layout
@@ -114,6 +114,7 @@ EAX = syscall number, EBX = arg1, ECX = arg2, EDX = arg3, return value in EAX
 | 13 | exec              | name, args → exit_code/-1 | load /bin/name, run as child process      |
 | 14 | chdir             | name → 0/-1               | change cwd; "/" or ".." supported         |
 | 15 | getpos            | → row*256+col             | get current VGA cursor position           |
+| 16 | panic             | msg_ptr → (no return)     | full-screen red panic + register dump + hlt |
 
 File descriptors: 0=stdin, 1=stdout, 2–5=FAT16 files (max 4 open, 16 KB buffer each)
 
@@ -130,15 +131,17 @@ File descriptors: 0=stdin, 1=stdout, 2–5=FAT16 files (max 4 open, 16 KB buffer
 
 ## Shell commands (user-space, in /bin)
 ```
-ls                    list files and dirs in cwd (dirs shown with trailing /)
+ls [dir]              list files and dirs in cwd or given dir (dirs shown with trailing /)
 <name> [args]         load /bin/<name>, execute with args
 rm <name>             delete file or empty dir (prompts y/N)
 mkdir <name>          create a subdirectory in cwd
 mv <src> <dst>        rename file or dir within cwd (no cross-dir moves)
 cd [dir]              change directory; cd .. to go up; cd / or bare cd for root
+clear                 clear the screen (clrscr syscall)
+exit                  exit the shell (kernel prints "Shell exited. System halted." and halts)
 __exit                signal QEMU to exit (automated tests only)
 ```
-Shell prompt shows cwd when not at root: `/subdir> `.
+Shell prompt shows cwd when not at root: `/subdir> ` (green, color 0x0A).
 Shell supports inline editing with left/right arrow keys.
 
 ## User programs (bin/)
@@ -161,6 +164,7 @@ Stored in `/bin` on FAT16 **without** `.bin` extension.
 | bin/rm.c         | rm         | remove file or empty directory (prompts y/N)          |
 | bin/mkdir.c      | mkdir      | create directory                                      |
 | bin/mv.c         | mv         | rename file or directory                              |
+| bin/panic.c      | panic      | trigger kernel panic with optional message            |
 
 ## Source layout
 ```
@@ -168,7 +172,7 @@ boot/boot_ide.asm      16-bit MBR bootloader (NASM, -f bin); LBA INT 13h AH=0x42
 kernel/entry.asm       32-bit kernel entry (_start → kernel_main); exec_run (IRET to ring 3)
 kernel/isr.asm         ISR stubs for INT 0-47 + 128
 kernel/idt.c           GDT + TSS setup (gdt_init), IDT setup, PIC remapping
-kernel/kernel.c        paging_init, VGA, keyboard, serial, ATA, syscalls 0-15, shell launch
+kernel/kernel.c        paging_init, VGA, keyboard, serial, ATA, syscalls 0-16, panic_screen, shell launch
 kernel/fat16.c         FAT16 R/W driver (fat16_init, fat16_read, fat16_write, fat16_listdir,
                        fat16_delete, fat16_mkdir, fat16_rename, fat16_chdir, fat16_read_from_bin)
 kernel/linker.ld       links kernel at 0x10000, entry.o first in .text
@@ -184,6 +188,7 @@ bin/ls.c               list directory contents
 bin/rm.c               remove file or empty directory
 bin/mkdir.c            create directory
 bin/mv.c               rename file or directory
+bin/panic.c            trigger kernel panic via SYS_PANIC syscall
 scripts/patch_boot.sh  splices boot code with BPB from mkfs.fat into sector 0
 Makefile               build + run targets; KERNEL_SECTORS is the single size constant
 tests/run_tests.py     automated test suite (pexpect + QEMU)
@@ -213,6 +218,7 @@ sends commands over the serial port, and checks output with pexpect.
 | vi_quit           | `vi test.txt` + `:q!` returns to shell                           |
 | segfault          | `segfault` prints "Segmentation fault", returns to shell         |
 | fs_operations     | mkdir / vi (create file) / rm file / cd .. / rm dir             |
+| panic             | `panic` prints `[PANIC]` on serial, system halts (run last)      |
 
 ## QEMU invocation
 ```bash
@@ -249,7 +255,10 @@ qemu-system-i386 \
 - [x] x86 paging (identity map, U/S protection)
 - [x] Ring-3 execution via IRET (IOPL=3, user stack 0x7FF000)
 - [x] Segmentation fault detection (#PF from ring 3 → message + return to shell)
-- [x] Automated test suite (9 tests, pexpect + QEMU)
+- [x] Kernel panic: full-screen red/yellow VGA display with GP + CR register dump
+- [x] SYS_PANIC (syscall 16) — user programs can trigger kernel panic with a message
+- [x] Shell built-ins: `clear` (clrscr), `exit` (halts system with message)
+- [x] Automated test suite (10 tests, pexpect + QEMU)
 
 ## User preferences
 - All code comments, commit messages and documentation: **English only**
