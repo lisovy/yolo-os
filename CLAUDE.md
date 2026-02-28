@@ -101,7 +101,7 @@ EAX = syscall number, EBX = arg1, ECX = arg2, EDX = arg3, return value in EAX
 |  0 | exit              | code                      | unwinds kernel stack via exec_ret_esp     |
 |  1 | write             | fd, buf, len → bytes      | fd 1 = stdout (VGA + serial)              |
 |  2 | read              | fd, buf, len → bytes      | fd 0 = stdin (keyboard, line-buffered)    |
-|  3 | open              | path, flags → fd or -1    | flags: 0=O_RDONLY, 1=O_WRONLY             |
+|  3 | open              | path, flags → fd or -1    | flags: 0=O_RDONLY, 1=O_WRONLY; path max 127 chars, returns -1 if exceeded |
 |  4 | close             | fd → 0 or -1              | O_WRONLY: flushes buffer to FAT16         |
 |  5 | getchar           | → char                    | blocking raw keyread, no echo             |
 |  6 | setpos            | row, col                  | move VGA hardware cursor                  |
@@ -218,6 +218,7 @@ sends commands over the serial port, and checks output with pexpect.
 | vi_quit           | `vi test.txt` + `:q!` returns to shell                           |
 | segfault          | `segfault` prints "Segmentation fault", returns to shell         |
 | fs_operations     | mkdir / vi (create file) / rm file / cd .. / rm dir             |
+| paths             | absolute paths: `xxd /bin/hello`, `cd /bin`, `vi /dir/file`, `xxd`/`rm` via full paths |
 | panic             | `panic` prints `[PANIC]` on serial, system halts (run last)      |
 
 ## QEMU invocation
@@ -236,6 +237,8 @@ qemu-system-i386 \
 - `USER_STACK_TOP = 0x7FF000` (kernel.c)
 - `FILE_BUF_SIZE = 16384` (kernel.c) — per-fd file buffer
 - `SHELL_LOAD_VIRT = 0x800000`, `CHILD_LOAD_VIRT = 0xC00000` (kernel.c)
+- `MAX_PATH = 127` (kernel.c fd_entry.name[128]) — max open/write path length; `sys_open` returns -1 if exceeded
+- `CWD_MAX = 128` (bin/sh.c) — shell prompt path buffer; `cd` prints "cd: path too long" if exceeded
 
 ## Roadmap
 - [x] Bootloader (16-bit, IDE, LBA, switches to 32-bit protected mode)
@@ -258,7 +261,9 @@ qemu-system-i386 \
 - [x] Kernel panic: full-screen red/yellow VGA display with GP + CR register dump
 - [x] SYS_PANIC (syscall 16) — user programs can trigger kernel panic with a message
 - [x] Shell built-ins: `clear` (clrscr), `exit` (halts system with message)
-- [x] Automated test suite (10 tests, pexpect + QEMU)
+- [x] Path support in FAT16 (absolute + multi-component paths in open/write/delete/mkdir/chdir)
+- [x] Path length limit 127 bytes enforced with user-visible errors
+- [x] Automated test suite (11 tests, pexpect + QEMU)
 
 ## User preferences
 - All code comments, commit messages and documentation: **English only**

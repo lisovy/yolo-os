@@ -86,7 +86,9 @@ All user interaction happens inside the shell process.
 > cd ..                 # go up to parent
 > hello                 # run /bin/hello
 > xxd BOOT.TXT          # run /bin/xxd with argument "BOOT.TXT"
+> xxd /bin/hello        # absolute path argument
 > vi notes.txt          # open notes.txt in the text editor
+> vi /docs/notes.txt    # create/open file via absolute path
 > demo                  # start the graphics demo
 > mkdir docs            # create a subdirectory in cwd
 > rm file.txt           # delete file (prompts y/N)
@@ -95,8 +97,11 @@ All user interaction happens inside the shell process.
 
 - Left/right arrow keys move the cursor within the current line
 - Up/down arrows are ignored (no history)
-- Prompt shows cwd when not at root: `/bin> `
+- Prompt shows cwd when not at root: `/bin> ` (green)
 - Programs are loaded from `/bin`; file syscalls inside the program use cwd
+- Absolute and multi-component paths are supported (e.g. `/bin/hello`, `/docs/sub/file.txt`)
+- Maximum path length is 127 characters; `cd` prints `cd: path too long` and file operations
+  return "cannot open" if the limit is exceeded
 
 ---
 
@@ -236,9 +241,11 @@ Read up to `len` bytes into `buf`. Returns number of bytes read, or `-1` on erro
 ```c
 int open(const char *path, int flags);
 ```
-Open a file in the current directory. Returns a file descriptor (`≥2`), or `-1` on error.
+Open a file. Returns a file descriptor (`≥2`), or `-1` on error.
 - `flags=O_RDONLY` (0) — read: file is loaded into a kernel buffer
 - `flags=O_WRONLY` (1) — write: creates the file if it does not exist, truncates if it does
+- `path` may be a simple filename, a relative path (`subdir/file.txt`), or an absolute path
+  (`/bin/hello`); maximum 127 characters — returns `-1` if exceeded
 
 ---
 
@@ -369,6 +376,7 @@ Direct x86 I/O port access. Available from ring 3 because the kernel sets `IOPL=
 | vi_quit | `vi test.txt` + `:q!` returns to shell |
 | segfault | `segfault` prints "Segmentation fault" and returns to shell |
 | fs_operations | `mkdir`, create file via `vi`, `rm` file, `rm` dir |
+| paths | absolute paths: `xxd /bin/hello`, `cd /bin`, `vi /dir/file`, `xxd`/`rm` via full paths |
 | panic | `panic` prints `[PANIC]` on serial and halts the system (run last) |
 
 ---
