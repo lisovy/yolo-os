@@ -53,7 +53,9 @@ User programs live in the `/bin` directory on the FAT16 partition (stored withou
 
 ## Memory layout
 
-![memory layout](docs/memory-layout.png)
+![physical memory layout](docs/physical-layout.png)
+
+![virtual address space](docs/virtual-layout.png)
 
 Physical memory above 1 MB is managed by a bitmap PMM. Each process receives its own set of
 frames (~300 KB: page directory, page table, 256 KB binary, 28 KB stack, 4 KB kernel stack).
