@@ -37,7 +37,8 @@ KOBJS := $(BUILD)/entry.o $(BUILD)/isr.o $(BUILD)/idt.o \
 # To add a new program: add its .bin to USER_BINS and write a build rule below.
 USER_BINS := $(BUILD)/sh.bin $(BUILD)/hello.bin $(BUILD)/xxd.bin $(BUILD)/vi.bin \
              $(BUILD)/demo.bin $(BUILD)/segfault.bin \
-             $(BUILD)/ls.bin $(BUILD)/rm.bin $(BUILD)/mkdir.bin $(BUILD)/mv.bin
+             $(BUILD)/ls.bin $(BUILD)/rm.bin $(BUILD)/mkdir.bin $(BUILD)/mv.bin \
+             $(BUILD)/panic.bin
 
 # ======================================================================
 .PHONY: all run clean newdisk test
@@ -137,6 +138,15 @@ $(BUILD)/mv.elf: $(BUILD)/mv.o bin/user.ld
 	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
 
 $(BUILD)/mv.bin: $(BUILD)/mv.elf
+	$(OBJCPY) -O binary $< $@
+
+$(BUILD)/panic.o: bin/panic.c bin/os.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/panic.elf: $(BUILD)/panic.o bin/user.ld
+	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
+
+$(BUILD)/panic.bin: $(BUILD)/panic.elf
 	$(OBJCPY) -O binary $< $@
 
 # --- Bootloader -------------------------------------------------------

@@ -37,6 +37,7 @@
 #define SYS_EXEC    13
 #define SYS_CHDIR   14
 #define SYS_GETPOS  15
+#define SYS_PANIC   16
 
 struct direntry { char name[13]; unsigned int size; int is_dir; };
 
@@ -131,6 +132,8 @@ static inline int chdir(const char *name)
 /* Get cursor position: high byte = row, low byte = col */
 static inline int getpos(void)
     { return syscall(SYS_GETPOS, 0, 0, 0); }
+static inline void kernel_panic(const char *msg)
+    { syscall(SYS_PANIC, (int)msg, 0, 0); }
 
 /* Direct hardware port I/O (ring 0 only) */
 static inline void outb(unsigned short port, unsigned char val)

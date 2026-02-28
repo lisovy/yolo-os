@@ -558,6 +558,7 @@ struct registers {
 #define SYS_EXEC    13   /* (name, args)   → child exit code or -1     */
 #define SYS_CHDIR   14   /* (name_ptr)     → 0/-1                      */
 #define SYS_GETPOS  15   /* ()             → row*256 + col             */
+#define SYS_PANIC   16   /* (msg_ptr)      → does not return           */
 
 struct direntry { char name[13]; unsigned int size; int is_dir; };
 
@@ -818,6 +819,15 @@ static void syscall_dispatch(struct registers *r)
         break;
     case SYS_GETPOS:
         r->eax = (unsigned int)(cursor_row * 256 + cursor_col);
+        break;
+    case SYS_PANIC:
+        vga_print("\n\n *** KERNEL PANIC: ", COLOR_ERR);
+        vga_print((const char *)r->ebx, COLOR_ERR);
+        vga_print(" *** \n", COLOR_ERR);
+        serial_print("[PANIC] ");
+        serial_print((const char *)r->ebx);
+        serial_putchar('\n');
+        for (;;) __asm__ volatile("hlt");
         break;
     case SYS_EXEC: {
         char name[13], args[ARGS_MAX];

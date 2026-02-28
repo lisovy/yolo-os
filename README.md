@@ -167,6 +167,17 @@ Deliberately writes to a kernel-only address (`0x1000`) to trigger a page fault.
 The kernel prints "Segmentation fault" and returns to the shell.
 Useful for verifying that ring-3 memory protection works.
 
+### panic
+
+Calls `kernel_panic()` with an optional message argument.
+
+```
+> panic
+> panic something went wrong
+```
+
+The screen turns red, the message is printed, and the CPU halts.
+
 ---
 
 ## Adding a new user program
@@ -323,6 +334,15 @@ int exec(const char *name, const char *args);
 ```
 Load and run `/bin/<name>`, passing `args` as the argument string.
 Returns the child's exit code, or `-1` if the program was not found.
+
+---
+
+```c
+void kernel_panic(const char *msg);
+```
+Trigger an immediate kernel panic from user space. The kernel prints `*** KERNEL PANIC: <msg> ***`
+on a red screen, writes the message to the serial port, and halts the CPU. **Does not return.**
+Intended for testing and fatal error conditions in user programs.
 
 ---
 
