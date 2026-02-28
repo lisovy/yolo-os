@@ -369,6 +369,7 @@ Direct x86 I/O port access. Available from ring 3 because the kernel sets `IOPL=
 | vi_quit | `vi test.txt` + `:q!` returns to shell |
 | segfault | `segfault` prints "Segmentation fault" and returns to shell |
 | fs_operations | `mkdir`, create file via `vi`, `rm` file, `rm` dir |
+| panic | `panic` prints `[PANIC]` on serial and halts the system (run last) |
 
 ---
 

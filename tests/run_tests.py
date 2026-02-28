@@ -161,6 +161,18 @@ def test_segfault(child: pexpect.spawn):
         return False, 'no "Segmentation fault" message'
 
 
+def test_panic(child: pexpect.spawn):
+    """panic utility triggers kernel panic; [PANIC] message appears on serial."""
+    child.sendline('panic kernel panic test')
+    try:
+        child.expect(r'\[PANIC\] kernel panic test', timeout=TIMEOUT_CMD)
+        return True, 'kernel panic triggered, [PANIC] confirmed on serial'
+    except pexpect.TIMEOUT:
+        return False, '[PANIC] message not seen on serial'
+    except pexpect.EOF:
+        return False, 'unexpected EOF waiting for panic output'
+
+
 def test_fs_operations(child: pexpect.spawn):
     """mkdir, create file in subdir via vi, rm file, cd .., rm dir."""
 
@@ -249,6 +261,7 @@ TESTS = [
     ('vi_quit',           test_vi_quit),
     ('segfault',          test_segfault),
     ('fs_operations',     test_fs_operations),
+    ('panic',             test_panic),   # must be last — halts the system
 ]
 
 # ── main ───────────────────────────────────────────────────────────────────────
