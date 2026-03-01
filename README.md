@@ -72,14 +72,10 @@ struct process
 │  parent_cr3      uint      parent's page directory (FG exec)     │
 │  phys_frames[0]  uint      page directory frame                  │
 │  phys_frames[1]  uint      user page table frame                 │
-│  n_frames        int       count of binary + stack frames        │
 ├──────────────────────────────────────────────────────────────────┤
 │  Kernel stack (ring-0)                                           │
 │  phys_kstack     uint      physical address of 4 KB ring-0 stack │
-│  saved_esp       uint ──►  saved register frame on phys_kstack:  │
-│                            [gs fs es ds  edi esi ebp esp         │
-│                             ebx edx ecx eax  int_no err_code     │
-│                             eip cs eflags  user_esp user_ss]     │
+│  saved_esp       uint ──►  saved register frame on phys_kstack   │
 ├──────────────────────────────────────────────────────────────────┤
 │  Foreground exec context                                         │
 │  saved_exec_ret_esp  uint  parent's exec_ret_esp (nested FG)     │
@@ -96,6 +92,29 @@ struct process
 The scheduler (IRQ0, 100 Hz) saves the current process's register frame pointer into
 `saved_esp`, picks the next READY process, switches CR3 and `tss.esp0`, and returns the new
 `saved_esp` to `isr_common` which does `mov esp, eax` before `iret`.
+
+### Interrupt / syscall stack frame
+
+Every ring-3 → ring-0 transition (hardware IRQ or `int 0x80`) leaves a 76-byte
+`struct registers` frame on the process's `phys_kstack`. `saved_esp` always points to its
+base. The scheduler switches processes by swapping this pointer.
+
+![interrupt stack frame](docs/interrupt-frame.png)
+
+### Per-process physical frame allocation
+
+Each process owns ~74 PMM frames (~296 kB). Three pointers in the PCB track the
+metadata frames; user binary and stack pages are freed by scanning the page table.
+
+![per-process frame allocation](docs/process-frames.png)
+
+### Page directory layout
+
+Every process has its own page directory (CR3). `pt_kernel` is a single static page table
+shared by all processes; PDE[2–511] are 4 MB PSE supervisor-only identity entries that let
+the kernel write to any physical frame without per-process kernel mappings.
+
+![page directory layout](docs/page-directory.png)
 
 ---
 
@@ -485,14 +504,14 @@ Delete a file or empty directory. Returns `0`, `-1` (not found), or `-2` (direct
 ---
 
 ```c
-int os_mkdir(const char *name);
+int mkdir(const char *name);
 ```
 Create a subdirectory in the current directory. Returns `0` or `-1`.
 
 ---
 
 ```c
-int os_rename(const char *src, const char *dst);
+int rename(const char *src, const char *dst);
 ```
 Rename a file or directory within the current directory. Returns `0` or `-1`.
 
