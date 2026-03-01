@@ -54,6 +54,47 @@ make test
   portable first-fit free-list allocator on top of `sbrk` — include it in any user program,
   no kernel changes required.
 
+### Process control block (PCB)
+
+Each entry in `g_procs[32]` holds everything the kernel needs to manage one process:
+
+```
+struct process
+┌──────────────────────────────────────────────────────────────────┐
+│ pid              int       process ID                            │
+│ state            enum      UNUSED / READY / RUNNING / WAITING /  │
+│                            SLEEPING / ZOMBIE                     │
+├──────────────────────────────────────────────────────────────────┤
+│  Page tables                                                     │
+│  cr3             uint      physical address of page directory    │
+│  parent_cr3      uint      parent's page directory (FG exec)     │
+│  phys_frames[0]  uint      page directory frame                  │
+│  phys_frames[1]  uint      user page table frame                 │
+│  n_frames        int       count of binary + stack frames        │
+├──────────────────────────────────────────────────────────────────┤
+│  Kernel stack (ring-0)                                           │
+│  phys_kstack     uint      physical address of 4 KB ring-0 stack │
+│  saved_esp       uint ──►  saved register frame on phys_kstack:  │
+│                            [gs fs es ds  edi esi ebp esp         │
+│                             ebx edx ecx eax  int_no err_code     │
+│                             eip cs eflags  user_esp user_ss]     │
+├──────────────────────────────────────────────────────────────────┤
+│  Foreground exec context                                         │
+│  saved_exec_ret_esp  uint  parent's exec_ret_esp (nested FG)     │
+├──────────────────────────────────────────────────────────────────┤
+│  Misc                                                            │
+│  heap_break      uint      current sbrk() break                  │
+│  wakeup_tick     uint      g_ticks value to wake from sleep      │
+│  is_background   int       0 = foreground,  1 = background       │
+│  saved_cwd_cluster uint    FAT16 CWD at launch (restored on exit)│
+│  exit_code       int       exit code                             │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+The scheduler (IRQ0, 100 Hz) saves the current process's register frame pointer into
+`saved_esp`, picks the next READY process, switches CR3 and `tss.esp0`, and returns the new
+`saved_esp` to `isr_common` which does `mov esp, eax` before `iret`.
+
 ---
 
 ## Disk layout
@@ -110,6 +151,26 @@ Virtual address space per process (all programs link at `0x400000`):
 The kernel boots, calls the PMM, allocates a process for `/bin/sh`, and execs it.
 All user interaction happens inside the shell process.
 
+### Built-in commands
+
+| Command | Description |
+|---------|-------------|
+| `cd [dir]` | Change directory; `cd` or `cd /` → root; `cd ..` → parent |
+| `clear` | Clear the screen |
+| `exit` | Exit the shell (kernel halts) |
+| `__exit` | Signal QEMU to quit (used by automated tests only) |
+
+### Running programs
+
+| Syntax | Description |
+|--------|-------------|
+| `<name>` | Run `/bin/<name>` in the foreground; shell waits for it to finish |
+| `<name> <args>` | Run with argument string (accessible via `get_args()`) |
+| `<name> &` | Run in the background; shell prompt returns immediately |
+| `<name> <args> &` | Background with arguments |
+
+### Examples
+
 ```
 > ls                    # list files and dirs in cwd (dirs shown with trailing /)
 > ls bin                # list contents of bin/
@@ -122,16 +183,20 @@ All user interaction happens inside the shell process.
 > vi /docs/notes.txt    # create/open file via absolute path
 > demo                  # start the graphics demo
 > free                  # show memory usage in kB
-> t_bg &               # run in background; prompt returns immediately
+> t_bg &                # run in background; prompt returns immediately
 > mkdir docs            # create a subdirectory in cwd
 > rm file.txt           # delete file (prompts y/N)
 > mv foo.txt bar.txt    # rename within current directory
 ```
 
-- Left/right arrow keys move the cursor within the current line
-- Append `&` after a command to run it in the background; the shell prompt returns immediately
+### Editing
+
+- Left/right arrow keys move the cursor within the current line; insert and delete work mid-line
 - Up/down arrows are ignored (no history)
 - Prompt shows cwd when not at root: `/bin> ` (green)
+
+### Paths
+
 - Programs are loaded from `/bin`; file syscalls inside the program use cwd
 - Absolute and multi-component paths are supported (e.g. `/bin/hello`, `/docs/sub/file.txt`)
 - Maximum path length is 127 characters; `cd` prints `cd: path too long` and file operations
@@ -212,6 +277,55 @@ Virt:     8192 kB     568 kB     7624 kB   (2 procs)
 
 - **Phys**: PMM stats — total managed RAM (~127 MB), allocated frames, free frames
 - **Virt**: per-process virtual address space (4 MB each) × number of active processes; used = mapped pages
+
+---
+
+## Process execution model
+
+### Our model vs. Linux/POSIX
+
+Linux programs run new processes via **`fork()` + `exec*()`**:
+
+```
+shell (parent)              child
+    │                         │
+    ├─── fork() ──────────────┤  duplicate the entire process
+    │                    exec*(prog)  replace child's image
+    │                         │  program runs
+    │    waitpid()            │
+    └───────────────◄─────────┘  parent unblocks (foreground)
+
+    background:  fork() + exec*(), parent skips waitpid()
+```
+
+The child inherits open file descriptors, environment variables, signal masks, and other
+process state from the parent before calling `exec*()` to replace its code. This is the
+standard Unix model.
+
+YOLO-OS uses a simpler **spawn model** (closer to POSIX `posix_spawn()`):
+
+```
+shell (parent)              child
+    │                         │
+    ├─── SYS_EXEC ────────────┤  kernel creates child from /bin directly
+    │    (EXEC_FG)       program runs
+    │    parent → WAITING     │
+    └───────────────◄─────────┘  parent unblocks on child exit (foreground)
+
+    background (EXEC_BG):  child → READY, parent continues immediately
+```
+
+There is no `fork()`. The kernel reads the binary from FAT16, allocates fresh page tables and
+a kernel stack, and runs the child. The child does not inherit open files or any other parent
+state — it starts with a clean slate. `exec()` returns the exit code (foreground) or the
+child's PID (background via `exec_bg()`).
+
+### Why not fork()?
+
+`fork()` requires either copy-on-write (complex MMU bookkeeping) or a full copy of all user
+pages (~300 KB per process). Both add significant kernel complexity. For an educational OS
+with a single shell process and simple programs that don't need to inherit state, a direct
+spawn model is sufficient and much simpler.
 
 ---
 
