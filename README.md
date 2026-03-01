@@ -28,7 +28,8 @@ make test
 - **Filesystem**: FAT16 on the same IDE disk image, read/write via ATA PIO; supports
   absolute and relative paths, subdirectories, create/delete/rename
 - **Timer**: PIT 8253 channel 0 at 100 Hz (IRQ0 → INT 32); `g_ticks` counter drives
-  `sleep()` — the only active hardware IRQ; all others remain masked.
+  `sleep()` and the preemptive round-robin scheduler — the only active hardware IRQ;
+  all others remain masked.
 - **Syscalls**: 20 syscalls via `int 0x80` — EAX = number, EBX/ECX/EDX = arguments,
   return value in EAX. Cover I/O (`read`/`write`), file access (`open`/`close`),
   directory ops (`readdir`/`mkdir`/`unlink`/`rename`/`chdir`), process management
@@ -36,6 +37,8 @@ make test
   (`setpos`/`clrscr`/`getchar`).
 - **Programs**: freestanding flat 32-bit binaries linked at `0x400000`, stored in `/bin` on
   FAT16 without extension. Include `bin/os.h` for all syscall wrappers — no libc needed.
+  Multiple processes run concurrently; the shell supports `cmd &` to launch a program in the
+  background while the shell stays interactive.
 - **Physical memory (PMM)**: bitmap allocator manages ~127 MB (0x100000–0x7FFFFFFF,
   32 512 frames of 4 KB). Each process receives its own set of frames: page directory,
   page table, 256 KB binary area, 28 KB stack, 4 KB kernel stack (~300 KB total).
@@ -119,12 +122,14 @@ All user interaction happens inside the shell process.
 > vi /docs/notes.txt    # create/open file via absolute path
 > demo                  # start the graphics demo
 > free                  # show memory usage in kB
+> t_bg &               # run in background; prompt returns immediately
 > mkdir docs            # create a subdirectory in cwd
 > rm file.txt           # delete file (prompts y/N)
 > mv foo.txt bar.txt    # rename within current directory
 ```
 
 - Left/right arrow keys move the cursor within the current line
+- Append `&` after a command to run it in the background; the shell prompt returns immediately
 - Up/down arrows are ignored (no history)
 - Prompt shows cwd when not at root: `/bin> ` (green)
 - Programs are loaded from `/bin`; file syscalls inside the program use cwd
@@ -222,6 +227,7 @@ automated test suite (`make test`). They are not interactive user utilities.
 | `t_mall1`  | Tests `malloc`: alloc, write, free+reuse, large alloc, exhaustion |
 | `t_mall2`  | Allocates 4 KB with `malloc`, writes within bounds, then overflows → segfault |
 | `t_sleep`  | Calls `sleep(1000)`, verifies return value 0, prints "sleep: OK" |
+| `t_bg`     | Sleeps 300 ms then prints "bg: OK"; used to test background execution |
 
 ---
 
@@ -378,9 +384,13 @@ Rename a file or directory within the current directory. Returns `0` or `-1`.
 
 ```c
 int exec(const char *name, const char *args);
+int exec_bg(const char *name, const char *args);
 ```
 Load and run `/bin/<name>`, passing `args` as the argument string.
-Returns the child's exit code, or `-1` if the program was not found.
+`exec()` runs the program **foreground**: the caller blocks until the child exits and returns
+the child's exit code, or `-1` if not found.
+`exec_bg()` runs the program **background**: the child is scheduled independently and the call
+returns the child's PID immediately. The shell uses this for the `cmd &` syntax.
 
 ---
 
@@ -455,6 +465,7 @@ Direct x86 I/O port access. Available from ring 3 because the kernel sets `IOPL=
 | t_mall1 | malloc alloc/write/free+reuse/large alloc/exhaustion → "malloc: OK" |
 | t_mall2 | malloc 4 KB alloc + overflow past boundary → segfault |
 | t_sleep | `t_sleep` calls `sleep(1000)` and prints "sleep: OK" |
+| background | `t_bg &` returns prompt immediately; `hello` runs concurrently; "bg: OK" appears ~300 ms later |
 | t_panic | `t_panic` prints `[PANIC]` on serial and halts the system (run last) |
 
 ---

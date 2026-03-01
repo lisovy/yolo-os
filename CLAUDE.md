@@ -9,7 +9,8 @@ Working directory on the development machine: `/tmp/os`
 - **Boot media**: IDE disk image (`disk.img`) booted via QEMU `-drive if=ide -boot c`
 - **Kernel load address**: 0x10000 (loaded by bootloader via INT 13h AH=0x42 LBA read)
 - **Stack**: 0x90000 (kernel stack, set by bootloader before jumping to kernel)
-- **Executables**: flat binary, linked at virtual 0x400000, run in ring 3, single active process at a time
+- **Executables**: flat binary, linked at virtual 0x400000, run in ring 3; multiple processes
+  run concurrently via preemptive round-robin scheduling (IRQ0, 100 Hz)
 - **Paging**: PMM bitmap allocator (0x100000–0x7FFFFFFF) hands out physical frames per process;
   each process owns a page directory (CR3) with shared `pt_kernel` (PDE[0]) + per-process user PT
   (PDE[1]); PDE[2–511] are 4 MB PSE supervisor-only identity pages so the kernel can write to any
@@ -35,8 +36,9 @@ Working directory on the development machine: `/tmp/os`
 [0x20] ring-3 data  DPL=3, 32-bit, flat 4 GB  → selector 0x23 (0x20|3)
 [0x28] TSS          type=0x89, DPL=0           → selector 0x28
 ```
-TSS holds a separate 4 KB kernel stack (`tss_stack[]`); `tss.esp0` is updated inside
-`exec_run()` so ring-3 → ring-0 transitions (syscalls) land safely below the saved context.
+Each process has its own 4 KB kernel stack (`phys_kstack`, PMM-allocated); `tss.esp0` is
+updated to `phys_kstack + 4096` before each ring-3 run so ring-3 → ring-0 transitions
+(syscalls, IRQs) land on the process's own kernel stack.
 
 ## Interrupts
 - IDT fully set up (256 entries)
@@ -115,7 +117,7 @@ EAX = syscall number, EBX = arg1, ECX = arg2, EDX = arg3, return value in EAX
 | 10 | unlink            | name → 0/-1/-2            | -2 = directory not empty                  |
 | 11 | mkdir             | name → 0/-1               | create subdirectory in cwd                |
 | 12 | rename            | src, dst → 0/-1           | rename within cwd                         |
-| 13 | exec              | name, args → exit_code/-1 | load /bin/name, run as child process      |
+| 13 | exec              | name, args, flags → exit_code/-1/pid | load /bin/name; flags: EXEC_FG=0 (foreground, blocks parent), EXEC_BG=1 (background, returns child PID) |
 | 14 | chdir             | name → 0/-1               | change cwd; "/" or ".." supported         |
 | 15 | getpos            | → row*256+col             | get current VGA cursor position           |
 | 16 | panic             | msg_ptr → (no return)     | full-screen red panic + register dump + hlt |
@@ -126,24 +128,37 @@ EAX = syscall number, EBX = arg1, ECX = arg2, EDX = arg3, return value in EAX
 File descriptors: 0=stdin, 1=stdout, 2–5=FAT16 files (max 4 open, 16 KB buffer each)
 
 ## Process execution model
-- `kernel_main()` calls `pmm_init()`, then `process_create("sh", "")` which allocates PMM
-  frames, builds a per-process page directory, and loads `/bin/sh`; sets CR3 to shell's PD,
-  then `exec_run(0x400000, 0x7FF000)`.
-- `SYS_EXEC`: copies name/args from parent user space, switches CR3 to kernel `page_dir`,
-  calls `process_create()` (allocates PMM frames, loads binary, builds page tables), saves
-  parent's `exec_ret_esp` in child PCB, switches CR3 to child PD, calls `exec_run()`.
-  After child exits: restores `exec_ret_esp` from child PCB, switches back to kernel `page_dir`,
-  calls `process_destroy()` (frees all PMM frames), restores parent CR3.
-  Supports unlimited nesting depth: each level's `exec_ret_esp` is saved in its child's PCB.
-- `exec_run()` in entry.asm: saves callee-saved regs + ESP to `exec_ret_esp`, then calls
-  `tss_set_ring0_stack(exec_ret_esp)` so nested syscalls land safely below saved context,
-  then IRETes to ring 3.
-- `SYS_EXIT` or segfault: restores ESP from `exec_ret_esp`, pops saved regs, returns.
+- **PCB states**: `PROC_UNUSED`, `PROC_RUNNING`, `PROC_READY`, `PROC_WAITING` (parent blocked
+  on foreground child), `PROC_SLEEPING`, `PROC_ZOMBIE` (exited, waiting to be reaped).
+- **Per-process kernel stack**: each PCB has a `phys_kstack` (4 KB, PMM-allocated). `process_create()`
+  builds an initial 76-byte ring-3 context frame on the kstack so the scheduler can start a new
+  process via IRET without going through `exec_run()`. `tss.esp0` is set to `phys_kstack + 4096`
+  before entering ring 3.
+- **Preemptive scheduler**: IRQ0 (100 Hz) saves `g_current->saved_esp = r` (pointer to the
+  pushed register frame), calls `pick_next_process()` (round-robin over READY/RUNNING), switches
+  CR3 and TSS.esp0, and returns the next process's `saved_esp`. `isr_common` in `isr.asm` does
+  `test eax, eax; jz .no_switch; mov esp, eax` before the final `iret`. ZOMBIE slots are skipped
+  without saving state; the scheduler switches away and they are reaped lazily by the next
+  `process_create()` call.
+- **`kernel_main()`**: calls `pmm_init()`, then `process_create("sh", "")`, sets CR3 to shell's
+  PD, then `exec_run(PROG_BASE, USER_STACK_TOP, shell->phys_kstack + PAGE_SIZE)`.
+- **`exec_run(entry, user_esp, kstack_top)`** in `entry.asm`: saves callee-saved regs + ESP to
+  `exec_ret_esp`, calls `tss_set_ring0_stack(kstack_top)`, then IRETs to ring 3.
+- **`SYS_EXEC` foreground (EDX=0 / `EXEC_FG`)**: parent → `PROC_WAITING`; child → `PROC_RUNNING`;
+  `exec_run()` called; on child exit: `cli`, longjmp via `exec_ret_esp` back to SYS_EXEC handler,
+  `g_current = parent`, `parent→PROC_RUNNING`, `tss_set_ring0_stack(parent->phys_kstack+PAGE_SIZE)`,
+  `sti`. Supports unlimited nesting depth; each level's `exec_ret_esp` is saved in the child's PCB.
+- **`SYS_EXEC` background (EDX=1 / `EXEC_BG`)**: child → `PROC_READY` (`is_background=1`); parent
+  stays `PROC_RUNNING`; returns child PID immediately. IRQ0 schedules the child on its next turn.
+- **`SYS_EXIT` / `#PF` foreground**: `cli`, longjmp via `exec_ret_esp`, returns to shell.
+- **`SYS_EXIT` / `#PF` background**: marks process `PROC_ZOMBIE`, enables interrupts, halts in a
+  loop; IRQ0 switches away; slot is freed lazily by the next `process_create()` call.
 
 ## Shell commands (user-space, in /bin)
 ```
 ls [dir]              list files and dirs in cwd or given dir (dirs shown with trailing /)
-<name> [args]         load /bin/<name>, execute with args
+<name> [args]         load /bin/<name>, execute with args (foreground, shell waits)
+<name> [args] &       load /bin/<name>, run in background (shell returns immediately)
 rm <name>             delete file or empty dir (prompts y/N)
 mkdir <name>          create a subdirectory in cwd
 mv <src> <dst>        rename file or dir within cwd (no cross-dir moves)
@@ -188,6 +203,7 @@ They are installed in `/bin` but are not intended as interactive user utilities.
 | bin/t_mall1.c    | t_mall1    | malloc: alloc/write/free+reuse/large alloc/exhaustion |
 | bin/t_mall2.c    | t_mall2    | malloc: overflow past 4 KB allocation → segfault      |
 | bin/t_sleep.c    | t_sleep    | sleep(1000): sleeps 1 s, prints "sleep: OK"           |
+| bin/t_bg.c       | t_bg       | sleep(300) then print "bg: OK"; tests background execution |
 
 ## Source layout
 ```
@@ -221,6 +237,7 @@ bin/t_panic.c          [test] trigger kernel panic via SYS_PANIC syscall
 bin/t_mall1.c          [test] malloc alloc/write/free/exhaustion
 bin/t_mall2.c          [test] malloc 4 KB alloc + overflow → segfault
 bin/t_sleep.c          [test] sleep(1000) → "sleep: OK"
+bin/t_bg.c             [test] sleep(300) → "bg: OK"; background execution test
 scripts/patch_boot.sh  splices boot code with BPB from mkfs.fat into sector 0
 Makefile               build + run targets; KERNEL_SECTORS is the single size constant
 tests/run_tests.py     automated test suite (pexpect + QEMU)
@@ -255,6 +272,7 @@ sends commands over the serial port, and checks output with pexpect.
 | t_mall1           | malloc alloc/write/free+reuse/large alloc/exhaustion → "malloc: OK" |
 | t_mall2           | malloc 4 KB alloc + overflow past boundary → segfault            |
 | t_sleep           | `t_sleep` calls sleep(1000) and prints "sleep: OK"               |
+| background        | `t_bg &` prompt returns immediately; `hello` runs; "bg: OK" appears ~300 ms later |
 | t_panic           | `t_panic` prints `[PANIC]` on serial, system halts (run last)    |
 
 ## QEMU invocation
@@ -308,7 +326,11 @@ qemu-system-i386 \
 - [x] SYS_SBRK (syscall 18) — heap growth via `sbrk()`; `bin/malloc.h` first-fit allocator on top
 - [x] PIT 8253 timer at 100 Hz (IRQ0 → INT 32); `g_ticks` counter
 - [x] SYS_SLEEP (syscall 19) + `sleep()` wrapper — hlt-based sleep, 10 ms granularity
-- [x] Automated test suite (15 tests, pexpect + QEMU)
+- [x] Preemptive round-robin scheduler (IRQ0, 100 Hz); per-process kernel stack (`phys_kstack`);
+      `PROC_WAITING` / `PROC_ZOMBIE` states; lazy zombie reuse in `process_create()`
+- [x] Background process execution (`cmd &`): `SYS_EXEC` EDX flag (EXEC_FG=0 / EXEC_BG=1);
+      `exec_bg()` wrapper in `bin/os.h`; `t_bg` test program
+- [x] Automated test suite (16 tests, pexpect + QEMU)
 
 ## User preferences
 - All code comments, commit messages and documentation: **English only**
