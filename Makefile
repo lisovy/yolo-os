@@ -40,7 +40,8 @@ USER_BINS := $(BUILD)/sh.bin $(BUILD)/hello.bin $(BUILD)/xxd.bin $(BUILD)/vi.bin
              $(BUILD)/ls.bin $(BUILD)/rm.bin $(BUILD)/mkdir.bin $(BUILD)/mv.bin \
              $(BUILD)/t_panic.bin $(BUILD)/free.bin \
              $(BUILD)/t_mall1.bin $(BUILD)/t_mall2.bin \
-             $(BUILD)/t_sleep.bin $(BUILD)/t_bg.bin
+             $(BUILD)/t_sleep.bin $(BUILD)/t_bg.bin \
+             $(BUILD)/t_exec.bin
 
 # ======================================================================
 .PHONY: all run clean newdisk test
@@ -194,6 +195,15 @@ $(BUILD)/t_bg.elf: $(BUILD)/t_bg.o bin/user.ld
 	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
 
 $(BUILD)/t_bg.bin: $(BUILD)/t_bg.elf
+	$(OBJCPY) -O binary $< $@
+
+$(BUILD)/t_exec.o: bin/t_exec.c bin/os.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/t_exec.elf: $(BUILD)/t_exec.o bin/user.ld
+	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
+
+$(BUILD)/t_exec.bin: $(BUILD)/t_exec.elf
 	$(OBJCPY) -O binary $< $@
 
 # --- Bootloader -------------------------------------------------------

@@ -325,6 +325,17 @@ def test_background(child: pexpect.spawn):
         return False, '"bg: OK" did not appear from background process'
 
 
+def test_exec_stress(child: pexpect.spawn):
+    """t_exec: spawn hello 300 times sequentially; verify all succeed."""
+    child.sendline('t_exec')
+    try:
+        child.expect('exec: OK', timeout=90)
+        wait_prompt(child)
+        return True, 'hello spawned 300 times without failure'
+    except pexpect.TIMEOUT:
+        return False, 't_exec did not print "exec: OK" within 90 s'
+
+
 def test_panic(child: pexpect.spawn):
     """t_panic utility triggers kernel panic; [PANIC] message appears on serial."""
     child.sendline('t_panic kernel panic test')
@@ -431,6 +442,7 @@ TESTS = [
     ('t_mall2',           test_malloc_oob),
     ('t_sleep',           test_sleep),
     ('background',        test_background),
+    ('t_exec',            test_exec_stress),
     ('t_panic',           test_panic),   # must be last — halts the system
 ]
 
