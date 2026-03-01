@@ -94,7 +94,7 @@ def make_disk_layout():
 # ── physical-layout.png ───────────────────────────────────────────────────────
 
 def make_physical_layout():
-    W, H = 700, 754
+    W, H = 700, 570
     img = Image.new("RGB", (W, H), "#f5f5f5")
     draw = ImageDraw.Draw(img)
 
@@ -144,28 +144,15 @@ def make_physical_layout():
         "PMM dynamic  (0x100000 – 0x7FFFFFFF  ·  ~127 MB  ·  32 512 frames)",
         "#00695c")
 
-    # outer container
-    draw.rounded_rectangle([LX, PM_Y + 20, RX, PM_Y + 298],
-                            radius=6, fill="#e0f2f1", outline="#00695c", width=2)
-    addr_label(PM_Y + 28, "0x100000")
-
-    text_center(draw, (LX+RX)//2, PM_Y + 36,
-                "per-process allocation  (~300 kB each)", fh, "#004d40")
-
-    pmm_rows = [
-        (PM_Y+ 54, 26, "#00897b", "#004d40", "page dir + page table    2 × 4 kB = 8 kB"),
-        (PM_Y+ 86, 68, "#43a047", "#2e7d32", "binary                  64 × 4 kB = 256 kB"),
-        (PM_Y+160, 36, "#f57c00", "#e65100", "stack + args             7 × 4 kB = 28 kB"),
-        (PM_Y+202, 26, "#5e35b1", "#311b92", "kernel stack             1 × 4 kB = 4 kB"),
-    ]
-    for (y, h, fill, outline, title) in pmm_rows:
-        draw.rounded_rectangle([LX+14, y, RX-14, y+h],
-                                radius=4, fill=fill, outline=outline, width=1)
-        text_center(draw, (LX+RX)//2, y + h//2, title, fs, "white")
-
-    text_center(draw, (LX+RX)//2, PM_Y + 244, "= 75 frames total per process", fh, "#00695c")
-    text_center(draw, (LX+RX)//2, PM_Y + 268, "× up to ~430 simultaneous processes", fl, "#00695c")
-    text_center(draw, (LX+RX)//2, PM_Y + 288, "unlimited nesting depth  ·  freed on exit", fl, "#00695c")
+    draw.rounded_rectangle([LX, PM_Y + 20, RX, PM_Y + 110],
+                            radius=6, fill="#00897b", outline="#00695c", width=2)
+    addr_label(PM_Y + 34, "0x100000")
+    text_center(draw, (LX+RX)//2, PM_Y + 46,
+                "bitmap PMM  ·  32 512 frames  ·  4 kB each", fh, "white")
+    text_center(draw, (LX+RX)//2, PM_Y + 68,
+                "~127 MB total  ·  up to ~430 procs", fl, "#e0f2f1")
+    text_center(draw, (LX+RX)//2, PM_Y + 88,
+                "see process-frames.png for detail", fl, "#b2dfdb")
 
     text_center(draw, W // 2, H - 18, "(heights not to scale)", fl, "#888")
 
@@ -229,14 +216,14 @@ def make_virtual_layout():
 # "stack grows downward" maps naturally onto the visual.
 
 def make_interrupt_frame():
-    ROW_H  = 30
+    ROW_H  = 46
     N_ROWS = 19
     LX, RX = 190, 530   # main column bounds
     OFF_X  = 86          # offset labels (left of LX)
     ANN_X  = RX + 12     # side annotation start
 
     TITLE_H = 78
-    FOOTER  = 52
+    FOOTER  = 56
     W = 760
     H = TITLE_H + N_ROWS * ROW_H + FOOTER
 
@@ -356,21 +343,17 @@ def make_interrupt_frame():
 # tracked implicitly via the page table.
 
 def make_process_frames():
-    W, H = 700, 500
-    img  = Image.new("RGB", (W, H), "#f5f5f5")
-    draw = ImageDraw.Draw(img)
+    W      = 700
+    Y0     = 78
+    FOOTER = 80
 
     fb = load_font(17)
     fs = load_font_regular(14)
     ft = load_font(22)
     fl = load_font_regular(13)
 
-    text_center(draw, W // 2, 30, "Per-process Physical Frame Allocation", ft, "#222")
-    text_center(draw, W // 2, 56, "~74 frames × 4 kB = 296 kB per process", fl, "#555")
-
     # Two-column table: left = bar, right = annotations
     BAR_L, BAR_R = 180, 380
-    BAR_W = BAR_R - BAR_L
 
     # Rows: (label, size_label, kb, fill, outline, pointer_label)
     # Heights are proportional to frame counts (not exact — binary is dominant)
@@ -382,12 +365,24 @@ def make_process_frames():
         ("user stack + args","7 frames  =  28 kB", 28,  "#e65100", "#bf360c", "PT scan [1016..1022]"),
     ]
     total_kb = sum(r[2] for r in rows)
-    AVAIL_H  = 350   # total drawable height for the bar
+    MIN_ROW  = 46
+    AVAIL_H  = 540   # target total bar height (will stretch up if min-rows dominate)
+
+    # Pre-compute row heights so we know exact total height before creating the image
+    row_heights = [max(MIN_ROW, int(AVAIL_H * r[2] / total_kb)) for r in rows]
+    bar_h = sum(row_heights)
+    H = Y0 + bar_h + FOOTER
+
+    img  = Image.new("RGB", (W, H), "#f5f5f5")
+    draw = ImageDraw.Draw(img)
+
+    text_center(draw, W // 2, 30, "Per-process Physical Frame Allocation", ft, "#222")
+    text_center(draw, W // 2, 56, "~74 frames × 4 kB = 296 kB per process", fl, "#555")
 
     Y0 = 78
     cur_y = Y0
-    for label, size_lbl, kb, fill, outline, ptr in rows:
-        rh = max(28, int(AVAIL_H * kb / total_kb))
+    for (label, size_lbl, kb, fill, outline, ptr), rh in zip(rows, row_heights):
+        rh = rh  # already computed
         draw.rounded_rectangle([BAR_L, cur_y, BAR_R, cur_y + rh],
                                 radius=4, fill=fill, outline=outline, width=2)
         cy = cur_y + rh // 2
