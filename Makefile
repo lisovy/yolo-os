@@ -39,7 +39,8 @@ USER_BINS := $(BUILD)/sh.bin $(BUILD)/hello.bin $(BUILD)/xxd.bin $(BUILD)/vi.bin
              $(BUILD)/demo.bin $(BUILD)/t_segflt.bin \
              $(BUILD)/ls.bin $(BUILD)/rm.bin $(BUILD)/mkdir.bin $(BUILD)/mv.bin \
              $(BUILD)/t_panic.bin $(BUILD)/free.bin \
-             $(BUILD)/t_mall1.bin $(BUILD)/t_mall2.bin
+             $(BUILD)/t_mall1.bin $(BUILD)/t_mall2.bin \
+             $(BUILD)/t_sleep.bin
 
 # ======================================================================
 .PHONY: all run clean newdisk test
@@ -166,6 +167,15 @@ $(BUILD)/t_mall1.elf: $(BUILD)/t_mall1.o bin/user.ld
 	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
 
 $(BUILD)/t_mall1.bin: $(BUILD)/t_mall1.elf
+	$(OBJCPY) -O binary $< $@
+
+$(BUILD)/t_sleep.o: bin/t_sleep.c bin/os.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/t_sleep.elf: $(BUILD)/t_sleep.o bin/user.ld
+	$(LD) -m elf_i386 -T bin/user.ld $< -o $@
+
+$(BUILD)/t_sleep.bin: $(BUILD)/t_sleep.elf
 	$(OBJCPY) -O binary $< $@
 
 $(BUILD)/t_mall2.o: bin/t_mall2.c bin/os.h | $(BUILD)

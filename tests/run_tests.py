@@ -290,6 +290,17 @@ def test_malloc_oob(child: pexpect.spawn):
         return False, 'no segfault for unmapped heap access'
 
 
+def test_sleep(child: pexpect.spawn):
+    """t_sleep: sleep(1000) returns 0 and prints confirmation."""
+    child.sendline('t_sleep')
+    try:
+        child.expect('sleep: OK', timeout=15)
+        wait_prompt(child)
+        return True, 'sleep(1000) completed successfully'
+    except pexpect.TIMEOUT:
+        return False, 'sleep did not complete or print "sleep: OK"'
+
+
 def test_panic(child: pexpect.spawn):
     """t_panic utility triggers kernel panic; [PANIC] message appears on serial."""
     child.sendline('t_panic kernel panic test')
@@ -394,6 +405,7 @@ TESTS = [
     ('free',              test_free),
     ('t_mall1',           test_malloc),
     ('t_mall2',           test_malloc_oob),
+    ('t_sleep',           test_sleep),
     ('t_panic',           test_panic),   # must be last — halts the system
 ]
 

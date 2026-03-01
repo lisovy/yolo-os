@@ -186,6 +186,7 @@ They are installed in `/bin` but are not intended as interactive user utilities.
 | bin/t_panic.c    | t_panic    | trigger kernel panic with optional message            |
 | bin/t_mall1.c    | t_mall1    | malloc: alloc/write/free+reuse/large alloc/exhaustion |
 | bin/t_mall2.c    | t_mall2    | malloc: overflow past 4 KB allocation → segfault      |
+| bin/t_sleep.c    | t_sleep    | sleep(1000): sleeps 1 s, prints "sleep: OK"           |
 
 ## Source layout
 ```
@@ -218,6 +219,7 @@ bin/t_segflt.c         [test] deliberate kernel-memory access → segfault
 bin/t_panic.c          [test] trigger kernel panic via SYS_PANIC syscall
 bin/t_mall1.c          [test] malloc alloc/write/free/exhaustion
 bin/t_mall2.c          [test] malloc 4 KB alloc + overflow → segfault
+bin/t_sleep.c          [test] sleep(1000) → "sleep: OK"
 scripts/patch_boot.sh  splices boot code with BPB from mkfs.fat into sector 0
 Makefile               build + run targets; KERNEL_SECTORS is the single size constant
 tests/run_tests.py     automated test suite (pexpect + QEMU)
@@ -251,6 +253,7 @@ sends commands over the serial port, and checks output with pexpect.
 | free              | Phys/Virt rows, total=130048 kB (32512×4), kB units, (2 procs)  |
 | t_mall1           | malloc alloc/write/free+reuse/large alloc/exhaustion → "malloc: OK" |
 | t_mall2           | malloc 4 KB alloc + overflow past boundary → segfault            |
+| t_sleep           | `t_sleep` calls sleep(1000) and prints "sleep: OK"               |
 | t_panic           | `t_panic` prints `[PANIC]` on serial, system halts (run last)    |
 
 ## QEMU invocation
