@@ -65,6 +65,14 @@ struct meminfo {
 #define HEAP_BASE  0x440000   /* first heap virtual address (right after binary) */
 static inline const char *get_args(void) { return (const char *)ARGS_BASE; }
 
+/* Memory utility */
+static inline void *memset(void *s, int c, unsigned int n)
+{
+    unsigned char *p = (unsigned char *)s;
+    while (n--) *p++ = (unsigned char)c;
+    return s;
+}
+
 /* Raw syscall — up to 3 arguments */
 static inline int syscall(int num, int a, int b, int c)
 {
@@ -138,10 +146,10 @@ static inline int readdir(struct direntry *buf, int max)
 static inline int unlink(const char *n)
     { return syscall(SYS_UNLINK, (int)n, 0, 0); }
 /* Create directory */
-static inline int os_mkdir(const char *n)
+static inline int mkdir(const char *n)
     { return syscall(SYS_MKDIR, (int)n, 0, 0); }
 /* Rename file or directory */
-static inline int os_rename(const char *s, const char *d)
+static inline int rename(const char *s, const char *d)
     { return syscall(SYS_RENAME, (int)s, (int)d, 0); }
 /* exec() flags for EDX (SYS_EXEC third argument) */
 #define EXEC_FG  0   /* foreground: shell waits for child to finish */

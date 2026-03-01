@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make:*)",
+      "Bash(timeout 3 qemu-system-i386:*)",
+      "Bash(pkill:*)",
+      "Bash(qemu-system-i386:*)",
+      "Bash(bash:*)",
+      "Bash(git:*)",
+      "Bash(objdump:*)",
+      "Bash(readelf:*)",
+      "Bash(nm:*)",
+      "Bash(mkdir:*)",
+      "WebFetch(domain:wiki.osdev.org)",
+      "WebSearch",
+      "Bash(python3:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(mdir:*)",
+      "WebFetch(domain:osdev.wiki)",
+      "WebFetch(domain:forum.osdev.org)",
+      "Bash(grep:*)"
+    ]
+  }
+}

@@ -29,7 +29,7 @@ void main(void)
         exit(1);
     }
 
-    if (os_rename(src, dst) < 0)
+    if (rename(src, dst) < 0)
         print("mv: failed\n");
     exit(0);
 }

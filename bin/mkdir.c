@@ -11,7 +11,7 @@ void main(void)
         print("mkdir: usage: mkdir <name>\n");
         exit(1);
     }
-    if (os_mkdir(name) < 0)
+    if (mkdir(name) < 0)
         print("mkdir: failed\n");
     exit(0);
 }

@@ -190,6 +190,12 @@ static void vga_print(const char *s, unsigned char color)
         vga_putchar(*s++, color);
 }
 
+/* Print string in default color (VGA + serial in DEBUG builds). */
+static void print(const char *s)
+{
+    vga_print(s, COLOR_DEFAULT);
+}
+
 /* ============================================================
  * VGA mode save / restore
  * Saves the text-mode register state and font at startup so the
@@ -1422,7 +1428,7 @@ unsigned int isr_handler(struct registers *r)
         if (r->int_no == 14 && (r->err_code & 0x04)) {
             if (g_current && g_current->is_background) {
                 /* Background process: mark zombie, yield via hlt loop */
-                vga_print("\nSegmentation fault\n", COLOR_DEFAULT);
+                print("\nSegmentation fault\n");
                 vga_check_and_restore_textmode();
                 fat16_set_cwd_cluster((unsigned short)g_current->saved_cwd_cluster);
                 g_current->exit_code = 139;
@@ -1431,7 +1437,7 @@ unsigned int isr_handler(struct registers *r)
                 for (;;) __asm__ volatile("hlt");
             } else if (exec_ret_esp != 0) {
                 /* Foreground process: longjmp back to SYS_EXEC handler */
-                vga_print("\nSegmentation fault\n", COLOR_DEFAULT);
+                print("\nSegmentation fault\n");
                 g_exit_code = 139;
                 __asm__ volatile(
                     "cli\n"
@@ -1599,12 +1605,12 @@ void kernel_main(void)
 
         fat16_write("BOOT.TXT", fat_buf, (unsigned int)slen);
 
-        vga_print("Boot #", COLOR_DEFAULT);
+        print("Boot #");
         vga_print(cnt_str, COLOR_HELLO);
-        vga_print("\n\n", COLOR_DEFAULT);
+        print("\n\n");
         serial_print("[disk] boot #"); serial_print(cnt_str); serial_putchar('\n');
     } else {
-        vga_print("Disk: error\n\n", COLOR_DEFAULT);
+        print("Disk: error\n\n");
         serial_print("[disk] error\n");
     }
 
@@ -1631,6 +1637,6 @@ void kernel_main(void)
     exec_run(PROG_BASE, USER_STACK_TOP, shell->phys_kstack + PAGE_SIZE);
 
     /* Shell called exit() — unrecoverable */
-    vga_print("Shell exited. System halted.\n", COLOR_DEFAULT);
+    print("Shell exited. System halted.\n");
     for (;;) __asm__ volatile("hlt");
 }
