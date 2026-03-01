@@ -301,6 +301,30 @@ def test_sleep(child: pexpect.spawn):
         return False, 'sleep did not complete or print "sleep: OK"'
 
 
+def test_background(child: pexpect.spawn):
+    """t_bg &: shell prompt returns immediately; 'bg: OK' appears ~300 ms later."""
+    child.sendline('t_bg &')
+    try:
+        # Shell must return a prompt immediately (before bg: OK)
+        child.expect(PROMPT, timeout=TIMEOUT_CMD)
+    except pexpect.TIMEOUT:
+        return False, 'shell did not return prompt after t_bg &'
+
+    # Run hello in the foreground while t_bg is sleeping in the background
+    child.sendline('hello')
+    try:
+        child.expect('Hello', timeout=TIMEOUT_CMD)
+    except pexpect.TIMEOUT:
+        return False, 'hello did not print while t_bg running in background'
+
+    # Wait for background output; the shell prompt appears before bg: OK
+    try:
+        child.expect('bg: OK', timeout=5)
+        return True, 'shell returned immediately; hello ran; bg: OK appeared'
+    except pexpect.TIMEOUT:
+        return False, '"bg: OK" did not appear from background process'
+
+
 def test_panic(child: pexpect.spawn):
     """t_panic utility triggers kernel panic; [PANIC] message appears on serial."""
     child.sendline('t_panic kernel panic test')
@@ -406,6 +430,7 @@ TESTS = [
     ('t_mall1',           test_malloc),
     ('t_mall2',           test_malloc_oob),
     ('t_sleep',           test_sleep),
+    ('background',        test_background),
     ('t_panic',           test_panic),   # must be last — halts the system
 ]
 

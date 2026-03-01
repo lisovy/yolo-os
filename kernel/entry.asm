@@ -19,11 +19,11 @@ _start:
     jmp .halt
 
 ; ======================================================================
-; exec_run(uint32_t entry, uint32_t user_stack_top) — ring-3 launcher
+; exec_run(uint32_t entry, uint32_t user_stack_top, uint32_t kstack_top)
 ;
-; Saves callee-saved registers and current ESP into exec_ret_esp, then
-; uses IRET to transfer control to ring 3 at the given entry point with
-; the given user stack top.
+; Saves callee-saved registers and current ESP into exec_ret_esp, sets
+; TSS ring-0 stack to kstack_top (per-process kernel stack top), then
+; uses IRET to transfer control to ring 3.
 ;
 ; On SYS_EXIT or segfault the handler restores ESP from exec_ret_esp and
 ; jumps to exec_run_return — unwinding back to the C caller of exec_run().
@@ -45,15 +45,18 @@ exec_run:
     push    edi
     mov     [exec_ret_esp], esp     ; save kernel ESP
 
-    ; Update TSS ring-0 stack so nested syscall from ring 3 lands below saved ESP,
-    ; preventing the ring-3 IRET frame from overwriting the saved kernel context.
-    push    dword [exec_ret_esp]
+    ; Set TSS ring-0 stack to kstack_top (per-process kernel stack).
+    ; Ring-3 → ring-0 transitions (syscalls, IRQs) land on the process's
+    ; own kernel stack rather than the shared 0x90000 main stack.
+    mov     eax, [esp+28]           ; kstack_top (third arg)
+    push    eax
     call    tss_set_ring0_stack
     add     esp, 4
 
     ; Arguments on stack (adjusted for 4 pushes above):
     ;   [esp+20] = entry  (first arg)
     ;   [esp+24] = user_stack_top (second arg)
+    ;   [esp+28] = kstack_top (third arg, already used above)
     mov     eax, [esp+20]   ; entry point
     mov     ecx, [esp+24]   ; user stack top
 

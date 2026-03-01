@@ -240,15 +240,27 @@ void main(void)
             }
         }
 
-        /* Any other word: parse "prog [args]" and exec */
-        char prog[14];
-        int  pi = 0;
-        while (cmd[pi] && cmd[pi] != ' ' && pi < 13) { prog[pi] = cmd[pi]; pi++; }
-        prog[pi] = '\0';
-        const char *args = (cmd[pi] == ' ') ? &cmd[pi + 1] : "";
+        /* Strip trailing spaces, then detect trailing '&' for background exec */
+        {
+            int len = sh_strlen(cmd);
+            while (len > 0 && cmd[len - 1] == ' ') len--;
+            int background = (len > 0 && cmd[len - 1] == '&');
+            if (background) {
+                cmd[--len] = '\0';
+                /* Strip spaces before the '&' */
+                while (len > 0 && cmd[len - 1] == ' ') cmd[--len] = '\0';
+            }
 
-        int ret = exec(prog, args);
-        if (ret < 0)
-            sh_print("unknown command\n");
+            /* Parse "prog [args]" */
+            char prog[14];
+            int  pi = 0;
+            while (cmd[pi] && cmd[pi] != ' ' && pi < 13) { prog[pi] = cmd[pi]; pi++; }
+            prog[pi] = '\0';
+            const char *args = (cmd[pi] == ' ') ? &cmd[pi + 1] : "";
+
+            int ret = background ? exec_bg(prog, args) : exec(prog, args);
+            if (ret < 0)
+                sh_print("unknown command\n");
+        }
     }
 }

@@ -143,9 +143,16 @@ static inline int os_mkdir(const char *n)
 /* Rename file or directory */
 static inline int os_rename(const char *s, const char *d)
     { return syscall(SYS_RENAME, (int)s, (int)d, 0); }
-/* Execute a program from /bin; returns child exit code or -1 if not found */
+/* exec() flags for EDX (SYS_EXEC third argument) */
+#define EXEC_FG  0   /* foreground: shell waits for child to finish */
+#define EXEC_BG  1   /* background: shell continues immediately      */
+
+/* Execute a program from /bin; blocks until child exits; returns exit code or -1 */
 static inline int exec(const char *name, const char *args)
-    { return syscall(SYS_EXEC, (int)name, (int)args, 0); }
+    { return syscall(SYS_EXEC, (int)name, (int)args, EXEC_FG); }
+/* Execute a program in the background; returns child PID or -1 */
+static inline int exec_bg(const char *name, const char *args)
+    { return syscall(SYS_EXEC, (int)name, (int)args, EXEC_BG); }
 /* Change current working directory */
 static inline int chdir(const char *name)
     { return syscall(SYS_CHDIR, (int)name, 0, 0); }

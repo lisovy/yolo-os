@@ -125,7 +125,14 @@ isr_common:
 
     push esp            ; argument: pointer to saved register state
     call isr_handler
-    add esp, 4
+    add esp, 4          ; remove argument; return value (new ESP or 0) is in EAX
+
+    ; If isr_handler returned a non-zero value, switch to that process's
+    ; kernel stack (preemptive context switch).
+    test eax, eax
+    jz   .no_switch
+    mov  esp, eax       ; switch to new process's saved kernel stack frame
+.no_switch:
 
     pop gs
     pop fs

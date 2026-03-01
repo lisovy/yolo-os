@@ -290,13 +290,23 @@ static void vga_restore_font(void)
     outb(0x3CE, 0x06); outb(0x3CF, saved_text_regs.gc[6]);
 }
 
-/* Full text-mode recovery — called by program_exec() after every user program.
+/* Full text-mode recovery — called after every user program exits.
  * Restores VGA registers and font without clearing the framebuffer so that
  * the output of text-mode programs remains visible after they exit. */
 static void vga_restore_textmode(void)
 {
     vga_restore_state();
     vga_restore_font();
+}
+
+/* Check if we left graphics mode and restore text mode.
+ * Clears the screen only if the program had switched to graphics mode. */
+static void vga_check_and_restore_textmode(void)
+{
+    outb(0x3CE, 0x06);
+    int was_graphics = (inb(0x3CF) != saved_text_regs.gc[6]);
+    vga_restore_textmode();
+    if (was_graphics) vga_clear();
 }
 
 /* ============================================================
@@ -741,14 +751,20 @@ static int sys_read(unsigned int fd, char *buf, unsigned int len)
 {
     if (fd == FD_STDIN) {
         unsigned int i = 0;
+        /* Enable interrupts so background processes can run while we wait. */
+        __asm__ volatile("sti");
         while (i < len) {
             char c = 0;
-            while (!c) c = kbd_getchar();
+            while (!c) {
+                __asm__ volatile("hlt");
+                c = kbd_getchar();
+            }
             buf[i++] = c;
             vga_putchar(c, COLOR_DEFAULT);
             serial_putchar(c);
             if (c == '\n') break;
         }
+        __asm__ volatile("cli");
         return (int)i;
     }
     if (fd >= FD_FILE0 && fd < (unsigned int)(FD_FILE0 + MAX_FILE_FDS)) {
@@ -811,6 +827,8 @@ static int sys_close(unsigned int fd)
 extern unsigned int exec_ret_esp;  /* defined in entry.asm; used by SYS_EXIT */
 static unsigned int g_exit_code;   /* set by SYS_EXIT, returned by SYS_EXEC */
 
+extern void tss_set_ring0_stack(unsigned int esp0);
+
 /* ============================================================
  * Forward declarations needed by syscall_dispatch
  * ============================================================ */
@@ -823,8 +841,10 @@ static unsigned int g_exit_code;   /* set by SYS_EXIT, returned by SYS_EXEC */
 #define USER_STACK_TOP 0x7FF000
 #define HEAP_BASE      0x440000   /* first heap page (VPN 64, right after binary) */
 #define HEAP_MAX       0x7F8000   /* heap limit: VPN 1015, stays clear of stack   */
+#define PAGE_SIZE      4096
 
-extern void         exec_run(unsigned int entry, unsigned int user_stack_top);
+extern void         exec_run(unsigned int entry, unsigned int user_stack_top,
+                              unsigned int kstack_top);
 extern int            fat16_listdir(void (*cb)(const char *name, unsigned int size, int is_dir));
 extern int            fat16_delete(const char *name);
 extern int            fat16_mkdir(const char *name);
@@ -853,7 +873,7 @@ static unsigned int pt_kernel[1024]  __attribute__((aligned(4096)));  /* 0–4 M
 #define PROC_MAX_FRAMES  2   /* phys_frames[0]=PD, phys_frames[1]=PT; user pages freed via PT scan */
 
 typedef enum { PROC_UNUSED=0, PROC_RUNNING, PROC_READY, PROC_ZOMBIE,
-               PROC_SLEEPING } proc_state_t;
+               PROC_SLEEPING, PROC_WAITING } proc_state_t;
 
 struct process {
     int            pid;
@@ -871,15 +891,34 @@ struct process {
 
     unsigned int   wakeup_tick;                /* g_ticks value at which to wake up   */
 
-    /* Reserved for future preemptive scheduler */
-    unsigned int   phys_kstack;
-    unsigned int   saved_esp;
+    unsigned int   phys_kstack;                /* physical address of per-process ring-0 stack */
+    unsigned int   saved_esp;                  /* saved kernel ESP for context switch */
 
     int            exit_code;
+
+    int            is_background;             /* 1 = background, 0 = foreground      */
+    unsigned int   saved_cwd_cluster;         /* FAT16 CWD at launch (BG exit restore) */
 };
 
 static struct process  g_procs[PROC_MAX_PROCS];
 static struct process *g_current = 0;
+
+static void process_destroy(struct process *p);  /* forward declaration */
+
+/* Round-robin: find next READY or RUNNING process (never returns g_current). */
+static struct process *pick_next_process(void)
+{
+    if (!g_current) return 0;
+    int cur = (int)(g_current - g_procs);
+    int i;
+    for (i = 1; i < PROC_MAX_PROCS; i++) {
+        int j = (cur + i) % PROC_MAX_PROCS;
+        proc_state_t s = g_procs[j].state;
+        if (s == PROC_READY || s == PROC_RUNNING)
+            return &g_procs[j];
+    }
+    return 0;
+}
 
 /*
  * process_create — build a per-process page directory and load the binary.
@@ -899,15 +938,21 @@ static struct process *process_create(const char *name, const char *args)
 {
     int i, slot = -1;
     for (i = 0; i < PROC_MAX_PROCS; i++) {
+        /* Lazily reuse ZOMBIE slots */
+        if (g_procs[i].state == PROC_ZOMBIE) {
+            process_destroy(&g_procs[i]);
+            g_procs[i].state = PROC_UNUSED;
+        }
         if (g_procs[i].state == PROC_UNUSED) { slot = i; break; }
     }
     if (slot < 0) return 0;
 
     struct process *p = &g_procs[slot];
-    p->n_frames    = 0;
-    p->pid         = slot + 1;
-    p->heap_break  = HEAP_BASE;
-    p->phys_kstack = 0;
+    p->n_frames      = 0;
+    p->pid           = slot + 1;
+    p->heap_break    = HEAP_BASE;
+    p->phys_kstack   = 0;
+    p->is_background = 0;
 
     /* Declare pt early so the fail: block can reference it safely */
     unsigned int *pt = (unsigned int *)0;
@@ -927,10 +972,37 @@ static struct process *process_create(const char *name, const char *args)
     pt                = (unsigned int *)pt_phys;
     for (i = 0; i < 1024; i++) pt[i] = 0;
 
-    /* [3] Allocate kernel stack */
+    /* [3] Allocate kernel stack and build initial ring-3 context frame.
+     * The frame mirrors what isr_common pushes when preempting a ring-3 process,
+     * allowing the scheduler to start this process via context switch on first run. */
     unsigned int kstack_phys = pmm_alloc();
     if (!kstack_phys) goto fail;
     p->phys_kstack = kstack_phys;
+    {
+        unsigned int *kst = (unsigned int *)(kstack_phys + PAGE_SIZE);
+        *(--kst) = 0x23;            /* user SS  (ring-3 data selector)   */
+        *(--kst) = USER_STACK_TOP;  /* user ESP                          */
+        *(--kst) = 0x3200;          /* EFLAGS: IF=1, IOPL=3              */
+        *(--kst) = 0x1B;            /* user CS  (ring-3 code selector)   */
+        *(--kst) = PROG_BASE;       /* user EIP (program entry point)    */
+        *(--kst) = 0;               /* err_code (dummy)                  */
+        *(--kst) = 0;               /* int_no   (dummy)                  */
+        /* pusha order on stack: EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI */
+        *(--kst) = 0;               /* EAX */
+        *(--kst) = 0;               /* ECX */
+        *(--kst) = 0;               /* EDX */
+        *(--kst) = 0;               /* EBX */
+        *(--kst) = 0;               /* ESP (ignored by popa) */
+        *(--kst) = 0;               /* EBP */
+        *(--kst) = 0;               /* ESI */
+        *(--kst) = 0;               /* EDI */
+        *(--kst) = 0x23;            /* DS */
+        *(--kst) = 0x23;            /* ES */
+        *(--kst) = 0x23;            /* FS */
+        *(--kst) = 0x23;            /* GS  ← saved_esp points here */
+        p->saved_esp = (unsigned int)kst;   /* = kstack_phys + PAGE_SIZE - 76 */
+    }
+    p->saved_cwd_cluster = fat16_get_cwd_cluster();
 
     /* [4] Allocate 64 contiguous frames for binary (VPN 0–63) */
     unsigned int bin_phys = pmm_alloc_contiguous(64);
@@ -1035,21 +1107,33 @@ static void syscall_dispatch(struct registers *r)
 {
     switch (r->eax) {
     case SYS_EXIT:
-        g_exit_code = r->ebx;
-        /* Restore the kernel stack saved by exec_run() and return to
-         * program_exec() as if exec_run() returned normally.
-         * exec_ret_esp points at: edi, esi, ebx, ebp, retaddr (low→high). */
-        __asm__ volatile (
-            "mov %0, %%esp\n"
-            "pop %%edi\n"
-            "pop %%esi\n"
-            "pop %%ebx\n"
-            "pop %%ebp\n"
-            "sti\n"
-            "ret\n"
-            :
-            : "r"(exec_ret_esp)
-        );
+        g_current->exit_code = (int)r->ebx;
+        if (g_current->is_background) {
+            /* Background process: restore VGA/CWD, mark zombie, yield via hlt.
+             * IRQ0 will context-switch away on the next tick. */
+            vga_check_and_restore_textmode();
+            fat16_set_cwd_cluster((unsigned short)g_current->saved_cwd_cluster);
+            g_current->state = PROC_ZOMBIE;
+            __asm__ volatile("sti");
+            for (;;) __asm__ volatile("hlt");
+        } else {
+            /* Foreground process: longjmp back to SYS_EXEC (or kernel_main).
+             * cli ensures IRQ0 doesn't fire between the ESP swap and the ret;
+             * sti is done in SYS_EXEC after g_current is updated. */
+            g_exit_code = (int)r->ebx;
+            __asm__ volatile(
+                "cli\n"
+                "mov %0, %%esp\n"
+                "pop %%edi\n"
+                "pop %%esi\n"
+                "pop %%ebx\n"
+                "pop %%ebp\n"
+                "ret\n"
+                :
+                : "r"(exec_ret_esp)
+                : "memory"
+            );
+        }
         break;
     case SYS_WRITE:
         r->eax = (unsigned int)sys_write(r->ebx, (const char *)r->ecx, r->edx);
@@ -1065,7 +1149,14 @@ static void syscall_dispatch(struct registers *r)
         break;
     case SYS_GETCHAR: {
         char c = 0;
-        while (!c) c = kbd_getchar();
+        /* Enable interrupts so the scheduler can run background processes
+         * while we are waiting for keyboard input. */
+        __asm__ volatile("sti");
+        while (!c) {
+            __asm__ volatile("hlt");
+            c = kbd_getchar();
+        }
+        __asm__ volatile("cli");
         r->eax = (unsigned int)(unsigned char)c;
         break;
     }
@@ -1202,6 +1293,9 @@ static void syscall_dispatch(struct registers *r)
         for (xi = 0; xi < ARGS_MAX - 1 && src_args[xi]; xi++) args[xi] = src_args[xi];
         args[xi] = '\0';
 
+        /* EDX bit 0: 0 = foreground, 1 = background */
+        int bg = (int)(r->edx & 1);
+
         unsigned short saved_cwd = fat16_get_cwd_cluster();
 
         /* [B] Switch to kernel page_dir (identity map needed for process_create) */
@@ -1217,36 +1311,48 @@ static void syscall_dispatch(struct registers *r)
             break;
         }
 
-        /* [D] Record parent context in child PCB */
+        child->is_background = bg;
+
+        if (bg) {
+            /* [BG] Background: child is READY, return PID to shell immediately.
+             * IRQ0 will schedule the child on its next turn. */
+            child->state = PROC_READY;
+            __asm__ volatile("mov %0, %%cr3" :: "r"(g_current->cr3) : "memory");
+            fat16_set_cwd_cluster(saved_cwd);
+            r->eax = (unsigned int)child->pid;
+            break;
+        }
+
+        /* [D] Foreground: record parent context in child PCB */
         child->parent_cr3         = g_current ? g_current->cr3 : (unsigned int)page_dir;
         child->saved_exec_ret_esp = exec_ret_esp;
         child->state              = PROC_RUNNING;
         struct process *parent    = g_current;
+        parent->state             = PROC_WAITING;   /* scheduler skips waiting parent */
         g_current                 = child;
         g_exit_code               = 0;
 
         /* [E] Switch to child page directory and run */
         __asm__ volatile("mov %0, %%cr3" :: "r"(child->cr3) : "memory");
-        exec_run(PROG_BASE, USER_STACK_TOP);
+        exec_run(PROG_BASE, USER_STACK_TOP, child->phys_kstack + PAGE_SIZE);
 
-        /* [F] Child finished — restore parent context */
+        /* [F] Child finished — SYS_EXIT did cli before longjmping here */
         exec_ret_esp         = child->saved_exec_ret_esp;
         unsigned int par_cr3 = child->parent_cr3;
         int          ecode   = g_exit_code;
 
-        /* [G] Cleanup: switch to kernel page_dir, destroy child, restore g_current */
+        /* [G] Cleanup: switch to kernel page_dir, destroy child */
         __asm__ volatile("mov %0, %%cr3" :: "r"(page_dir) : "memory");
         process_destroy(child);
-        g_current = parent;
+
+        /* Update g_current before sti so IRQ0 sees correct state */
+        g_current     = parent;
+        parent->state = PROC_RUNNING;
+        tss_set_ring0_stack(parent->phys_kstack + PAGE_SIZE);
+        __asm__ volatile("sti");   /* re-enable interrupts */
 
         /* [H] Restore VGA text mode, cwd, then switch to parent page_dir */
-        outb(0x3CE, 0x06);
-        if (inb(0x3CF) != saved_text_regs.gc[6]) {
-            vga_restore_textmode();
-            vga_clear();
-        } else {
-            vga_restore_textmode();
-        }
+        vga_check_and_restore_textmode();
         fat16_set_cwd_cluster(saved_cwd);
         __asm__ volatile("mov %0, %%cr3" :: "r"(par_cr3) : "memory");
 
@@ -1307,28 +1413,39 @@ static const char *exception_name(unsigned int n)
     return "Reserved";
 }
 
-/* Called from isr_common; r points to the saved register frame on the stack */
-void isr_handler(struct registers *r)
+/* Called from isr_common; r points to the saved register frame on the stack.
+ * Returns 0 for no context switch, or new process's saved_esp to switch. */
+unsigned int isr_handler(struct registers *r)
 {
     if (r->int_no < 32) {
-        /* Page fault from user space: deliver segfault and return to shell */
-        if (r->int_no == 14 && (r->err_code & 0x04) && exec_ret_esp != 0) {
-            vga_print("\nSegmentation fault\n", COLOR_DEFAULT);
-            g_exit_code = 139;
-            /* Restore kernel stack saved by exec_run() and return to
-             * program_exec() via exec_run_return label.
-             * Stack at exec_ret_esp: edi, esi, ebx, ebp, retaddr. */
-            __asm__ volatile (
-                "mov %0, %%esp\n"
-                "pop %%edi\n"
-                "pop %%esi\n"
-                "pop %%ebx\n"
-                "pop %%ebp\n"
-                "sti\n"
-                "ret\n"
-                :
-                : "r"(exec_ret_esp)
-            );
+        /* Page fault from user space: deliver segfault */
+        if (r->int_no == 14 && (r->err_code & 0x04)) {
+            if (g_current && g_current->is_background) {
+                /* Background process: mark zombie, yield via hlt loop */
+                vga_print("\nSegmentation fault\n", COLOR_DEFAULT);
+                vga_check_and_restore_textmode();
+                fat16_set_cwd_cluster((unsigned short)g_current->saved_cwd_cluster);
+                g_current->exit_code = 139;
+                g_current->state = PROC_ZOMBIE;
+                __asm__ volatile("sti");
+                for (;;) __asm__ volatile("hlt");
+            } else if (exec_ret_esp != 0) {
+                /* Foreground process: longjmp back to SYS_EXEC handler */
+                vga_print("\nSegmentation fault\n", COLOR_DEFAULT);
+                g_exit_code = 139;
+                __asm__ volatile(
+                    "cli\n"
+                    "mov %0, %%esp\n"
+                    "pop %%edi\n"
+                    "pop %%esi\n"
+                    "pop %%ebx\n"
+                    "pop %%ebp\n"
+                    "ret\n"
+                    :
+                    : "r"(exec_ret_esp)
+                    : "memory"
+                );
+            }
         }
 
         /* CPU exception — print panic screen and halt */
@@ -1347,6 +1464,26 @@ void isr_handler(struct registers *r)
                     g_ticks >= g_procs[si].wakeup_tick)
                     g_procs[si].state = PROC_RUNNING;
             }
+            /* Preemptive context switch: find next runnable process */
+            if (g_current) {
+                struct process *next = pick_next_process();
+                if (next) {
+                    if (g_current->state != PROC_ZOMBIE) {
+                        /* Save current process's context */
+                        g_current->saved_esp = (unsigned int)r;
+                        if (g_current->state == PROC_RUNNING)
+                            g_current->state = PROC_READY;
+                    }
+                    /* Switch to next process (works for both normal and zombie) */
+                    next->state = PROC_RUNNING;
+                    g_current   = next;
+                    __asm__ volatile("mov %0, %%cr3" :: "r"(next->cr3) : "memory");
+                    tss_set_ring0_stack(next->phys_kstack + PAGE_SIZE);
+                    /* EOI before returning — must send before iret */
+                    outb(0x20, 0x20);
+                    return next->saved_esp;
+                }
+            }
         }
         /* EOI */
         if (r->int_no >= 40)
@@ -1356,6 +1493,7 @@ void isr_handler(struct registers *r)
     } else if (r->int_no == 0x80) {
         syscall_dispatch(r);
     }
+    return 0;
 }
 
 extern void idt_init(void);
@@ -1490,7 +1628,7 @@ void kernel_main(void)
 
     /* Switch to shell page directory and exec shell at virtual 0x400000 */
     __asm__ volatile("mov %0, %%cr3" :: "r"(shell->cr3) : "memory");
-    exec_run(PROG_BASE, USER_STACK_TOP);
+    exec_run(PROG_BASE, USER_STACK_TOP, shell->phys_kstack + PAGE_SIZE);
 
     /* Shell called exit() — unrecoverable */
     vga_print("Shell exited. System halted.\n", COLOR_DEFAULT);
