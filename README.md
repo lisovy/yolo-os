@@ -605,6 +605,80 @@ Direct x86 I/O port access. Available from ring 3 because the kernel sets `IOPL=
 
 ---
 
+## What is missing
+
+### Inter-process communication (semaphores + shared memory)
+
+Processes currently run in complete isolation — they share no data and have no
+synchronisation primitives.  A producer/consumer pattern would require both a
+shared data channel and a way to signal across process boundaries.
+
+#### Named semaphores
+
+A semaphore is a kernel-managed counter with a wait queue.  Implementation
+would require no MMU changes:
+
+- A static kernel table `g_sems[]` of semaphore descriptors, each holding a
+  name, a value, and a list of waiting PIDs.
+- Four new syscalls: `sem_open(name, init_val)`, `sem_wait(id)`,
+  `sem_post(id)`, `sem_close(id)`.
+- `sem_wait` decrements the counter; if it reaches zero the calling process is
+  moved to a new `PROC_SEM_WAIT` state and the scheduler picks another process.
+  The decrement-check-block sequence runs with interrupts disabled (`cli`) —
+  sufficient on a single-core system.
+- `sem_post` increments the counter and moves one waiting process back to
+  `PROC_READY`.
+- Processes find the same semaphore by name, since there is no `fork()` to
+  inherit a descriptor.
+
+Estimated kernel addition: ~150 lines, no page-table changes.
+
+#### Shared memory
+
+The obstacle is the virtual address space.  Every process has an identical
+layout (binary at `0x400000`, heap growing from `0x440000`, stack at
+`0x7FF000`), all within the single 4 MB user page table (PDE[1]).
+
+The cleanest approach for this OS is a **fixed-VA shared region** — a portion
+of the PTE[64–1015] range carved out at compile time and reserved in every
+process's page table, whether or not the process uses it.  Example with 512 KB
+reserved at the top of the available range:
+
+```
+PTE[0–63]      0x400000–0x43FFFF   256 kB   binary       (unchanged)
+PTE[64–831]    0x440000–0x67FFFF  3072 kB   heap (sbrk)  (shortened)
+PTE[832–959]   0x680000–0x6FFFFF   512 kB   SHM region   (new, fixed VA)
+PTE[960–1015]  0x700000–0x7F7FFF   384 kB   unused gap
+PTE[1016–1022] 0x7F8000–0x7FEFFF    28 kB   stack + args (unchanged)
+```
+
+Practical limits of this approach:
+- **Maximum segment size**: up to the total reserved range (e.g. 512 kB), split
+  into a fixed number of named slots decided at compile time.
+- **Processes per segment**: all 32 (`PROC_MAX_PROCS`), limited by PMM
+  reference counting (a `uint8_t refcount[]` array alongside the PMM bitmap).
+- **Concurrent segments**: equal to the number of pre-carved slots (e.g. 4 ×
+  128 kB).  Each additional slot permanently shortens the heap in every
+  process, even those that never use shared memory.
+
+Required kernel changes beyond semaphores:
+- PMM gains a `pmm_refcount[]` array; `pmm_free` decrements rather than
+  unconditionally releasing.
+- `process_destroy` detaches any attached SHM segments (decrement refcount,
+  unmap PTE entries) instead of blindly freeing them.
+- Three new syscalls: `shm_open(name, size)` → maps segment into caller's PT
+  at the pre-defined slot VA and returns that address; `shm_close(id)` →
+  unmaps; kernel finds or creates the named segment, allocating physical frames
+  on first open.
+
+The main drawback of fixed-VA shared memory is that the trade-off between heap
+size and number/size of SHM slots is fixed at compile time.  The alternative
+— a dedicated PDE entry for the SHM region (e.g. PDE[2] at `0x800000+`) —
+avoids shrinking the heap but requires replacing one of the supervisor-only PSE
+identity entries, adding MMU complexity.
+
+---
+
 ## Build targets
 
 | Target | Description |
