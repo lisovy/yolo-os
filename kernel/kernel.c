@@ -672,6 +672,12 @@ static void panic_screen(const char *msg, struct registers *r)
 #define SYS_PANIC   16   /* (msg_ptr)      → does not return           */
 #define SYS_MEMINFO 17   /* (meminfo_ptr)  → 0                         */
 #define SYS_SBRK    18   /* (n)            → old_break or -1           */
+#define SYS_SLEEP   19   /* (ms)           → 0                         */
+
+/* PIT tick frequency — must match divisor in pit_init() in idt.c */
+#define PIT_HZ      100
+
+static unsigned int g_ticks = 0;   /* incremented by IRQ0 (PIT) every 10 ms */
 
 struct meminfo {
     unsigned int phys_total_kb;
@@ -846,7 +852,8 @@ static unsigned int pt_kernel[1024]  __attribute__((aligned(4096)));  /* 0–4 M
 #define PROC_MAX_PROCS  32
 #define PROC_MAX_FRAMES  2   /* phys_frames[0]=PD, phys_frames[1]=PT; user pages freed via PT scan */
 
-typedef enum { PROC_UNUSED=0, PROC_RUNNING, PROC_READY, PROC_ZOMBIE } proc_state_t;
+typedef enum { PROC_UNUSED=0, PROC_RUNNING, PROC_READY, PROC_ZOMBIE,
+               PROC_SLEEPING } proc_state_t;
 
 struct process {
     int            pid;
@@ -861,6 +868,8 @@ struct process {
     unsigned int   heap_break;                 /* current heap break (sbrk)           */
 
     unsigned int   saved_exec_ret_esp;         /* exec_ret_esp of parent */
+
+    unsigned int   wakeup_tick;                /* g_ticks value at which to wake up   */
 
     /* Reserved for future preemptive scheduler */
     unsigned int   phys_kstack;
@@ -1244,6 +1253,22 @@ static void syscall_dispatch(struct registers *r)
         r->eax = (unsigned int)ecode;
         break;
     }
+    case SYS_SLEEP: {
+        /* sleep(ms): block the current process for at least ms milliseconds.
+         * The PIT fires at PIT_HZ; each tick is 1000/PIT_HZ ms.
+         * The process spins on hlt (with interrupts enabled) until the timer
+         * ISR sets its state back to PROC_RUNNING. */
+        unsigned int ms = r->ebx;
+        unsigned int ticks = (ms * (unsigned int)PIT_HZ + 999u) / 1000u;
+        if (ticks == 0) ticks = 1;
+        g_current->wakeup_tick = g_ticks + ticks;
+        g_current->state = PROC_SLEEPING;
+        __asm__ volatile("sti");
+        while (g_current->state == PROC_SLEEPING)
+            __asm__ volatile("hlt");
+        r->eax = 0;
+        break;
+    }
     default:
         r->eax = (unsigned int)-1;
         break;
@@ -1311,7 +1336,19 @@ void isr_handler(struct registers *r)
         for (;;) __asm__ volatile("hlt");
 
     } else if (r->int_no < 48) {
-        /* Hardware IRQ — send EOI and return */
+        /* Hardware IRQ */
+        if (r->int_no == 32) {
+            /* IRQ0 — PIT tick */
+            int si;
+            g_ticks++;
+            /* Wake any processes whose sleep timer has expired */
+            for (si = 0; si < PROC_MAX_PROCS; si++) {
+                if (g_procs[si].state == PROC_SLEEPING &&
+                    g_ticks >= g_procs[si].wakeup_tick)
+                    g_procs[si].state = PROC_RUNNING;
+            }
+        }
+        /* EOI */
         if (r->int_no >= 40)
             outb(0xA0, 0x20);   /* slave EOI */
         outb(0x20, 0x20);       /* master EOI */
@@ -1323,6 +1360,7 @@ void isr_handler(struct registers *r)
 
 extern void idt_init(void);
 extern void gdt_init(void);
+extern void pit_init(void);
 extern int  fat16_init(void);
 
 /* ============================================================
@@ -1433,6 +1471,9 @@ void kernel_main(void)
     }
 
     serial_print("[kernel] ready\n");
+
+    pit_init();
+    serial_print("[kernel] PIT ready (100 Hz)\n");
 
     pmm_init();
     serial_print("[kernel] PMM ready\n");

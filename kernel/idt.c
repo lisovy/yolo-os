@@ -189,9 +189,29 @@ static void pic_remap(void)
     /* ICW4: 8086 mode */
     outb(PIC1_DATA, 0x01);
     outb(PIC2_DATA, 0x01);
-    /* Mask all IRQs — we do not use interrupt-driven I/O yet */
+    /* Mask all IRQs initially; pit_init() will unmask IRQ0 */
     outb(PIC1_DATA, 0xFF);
     outb(PIC2_DATA, 0xFF);
+}
+
+/* ============================================================
+ * PIT (Programmable Interval Timer) — channel 0 at 100 Hz
+ *
+ * Oscillator: 1 193 180 Hz.  Divisor = 1193180 / 100 = 11931 → ~100.02 Hz.
+ * Must match PIT_HZ defined in kernel.c.
+ * ============================================================ */
+
+#define PIT_CMD  0x43
+#define PIT_CH0  0x40
+
+void pit_init(void)
+{
+    unsigned int divisor = 11932;          /* 1193180 / 100 Hz */
+    outb(PIT_CMD, 0x36);                   /* channel 0, lo/hi byte, mode 3 (square wave) */
+    outb(PIT_CH0, (uint8_t)(divisor & 0xFF));
+    outb(PIT_CH0, (uint8_t)(divisor >> 8));
+    /* Unmask IRQ0 (bit 0) in master PIC; all other IRQs remain masked */
+    outb(PIC1_DATA, 0xFE);
 }
 
 /* ============================================================

@@ -119,6 +119,8 @@ EAX = syscall number, EBX = arg1, ECX = arg2, EDX = arg3, return value in EAX
 | 15 | getpos            | → row*256+col             | get current VGA cursor position           |
 | 16 | panic             | msg_ptr → (no return)     | full-screen red panic + register dump + hlt |
 | 17 | meminfo           | meminfo_ptr → 0           | fills struct meminfo with PMM + virtual stats |
+| 18 | sbrk              | n → old_break or -1       | grow heap by n bytes; maps pages on demand    |
+| 19 | sleep             | ms → 0                    | sleep at least ms ms; granularity 10 ms (100 Hz PIT) |
 
 File descriptors: 0=stdin, 1=stdout, 2–5=FAT16 files (max 4 open, 16 KB buffer each)
 
@@ -261,6 +263,7 @@ qemu-system-i386 \
 
 ## Key constants
 - `KERNEL_SECTORS = 128` (Makefile) — sectors reserved for kernel; single source of truth
+- `PIT_HZ = 100` (kernel.c + idt.c) — PIT tick frequency; `g_ticks` incremented each tick; sleep granularity = 10 ms
 - `VGA_ROWS = 25`, `VGA_COLS = 80` (kernel.c)
 - `PROG_BASE = 0x400000`, `PROG_MAX_SIZE = 256 KB` (kernel.c)
 - `ARGS_BASE = 0x7FC000`, `ARGS_MAX = 200` (kernel.c + os.h)

@@ -40,6 +40,7 @@
 #define SYS_PANIC   16
 #define SYS_MEMINFO 17
 #define SYS_SBRK    18
+#define SYS_SLEEP   19
 
 struct direntry { char name[13]; unsigned int size; int is_dir; };
 
@@ -155,6 +156,9 @@ static inline void kernel_panic(const char *msg)
     { syscall(SYS_PANIC, (int)msg, 0, 0); }
 static inline int meminfo(struct meminfo *info)
     { return syscall(SYS_MEMINFO, (int)info, 0, 0); }
+/* Sleep for at least ms milliseconds (granularity: 10 ms at 100 Hz) */
+static inline int sleep(unsigned int ms)
+    { return syscall(SYS_SLEEP, (int)ms, 0, 0); }
 
 /* Direct hardware port I/O (ring 0 only) */
 static inline void outb(unsigned short port, unsigned char val)
