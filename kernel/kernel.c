@@ -349,31 +349,25 @@ static const char scancode_map_shift[] = {
 static int shift_pressed = 0;
 static int e0_seen = 0;   /* set when 0xE0 prefix byte is received */
 
+/* Keyboard ring buffer — filled by IRQ1 handler, drained by kbd_getchar().
+ * unsigned char indices wrap naturally at 256; no explicit modulo needed. */
+#define KBD_BUF_SIZE 256
+static char              kbd_buf[KBD_BUF_SIZE];
+static volatile unsigned char kbd_head = 0;   /* write index (IRQ1 handler) */
+static volatile unsigned char kbd_tail = 0;   /* read  index (kbd_getchar)  */
+
 /*
- * Non-blocking: returns 0 immediately if no key is ready.
- * Tracks Shift state; handles 0xE0-prefixed extended keys (arrows).
- * Returns KEY_UP/DOWN/LEFT/RIGHT for arrow keys, ASCII for others.
+ * Translate one raw scancode byte into an ASCII/KEY_* value.
+ * Updates shift_pressed and e0_seen state.
+ * Returns 0 for non-printing scancodes (modifier keys, key-release events).
+ * Called from IRQ1 handler — no port reads here, caller already did inb(KBD_DATA).
  */
-static char kbd_getchar(void)
+static char kbd_decode(unsigned char sc)
 {
-    /* Check COM1 receive buffer first (used by automated tests via -serial stdio). */
-    if (inb(COM1 + 5) & 0x01) {
-        char c = (char)inb(COM1);
-        return (c == '\r') ? '\n' : c;   /* normalise CR → LF */
-    }
-
-    if (!(inb(KBD_STATUS) & 0x01))
-        return 0;
-
-    unsigned char sc = inb(KBD_DATA);
-
-    if (sc == 0xE0) {
-        e0_seen = 1;
-        return 0;
-    }
+    if (sc == 0xE0) { e0_seen = 1; return 0; }
 
     if (sc & 0x80) {
-        /* key-release: clear any E0 state and update shift */
+        /* key-release: update shift state and clear E0 prefix */
         unsigned char make = sc & 0x7F;
         if (make == SC_LSHIFT || make == SC_RSHIFT)
             shift_pressed = 0;
@@ -392,13 +386,30 @@ static char kbd_getchar(void)
         }
     }
 
-    if (sc == SC_LSHIFT || sc == SC_RSHIFT) {
-        shift_pressed = 1;
-        return 0;
-    }
+    if (sc == SC_LSHIFT || sc == SC_RSHIFT) { shift_pressed = 1; return 0; }
 
     if (sc < SCANCODE_MAP_SIZE)
         return shift_pressed ? scancode_map_shift[sc] : scancode_map[sc];
+
+    return 0;
+}
+
+/*
+ * Non-blocking: returns 0 immediately if no key is ready.
+ * Checks COM1 first (automated tests inject keystrokes via serial),
+ * then drains the keyboard ring buffer filled by the IRQ1 handler.
+ */
+static char kbd_getchar(void)
+{
+    /* COM1 serial: automated tests send keystrokes via -serial stdio */
+    if (inb(COM1 + 5) & 0x01) {
+        char c = (char)inb(COM1);
+        return (c == '\r') ? '\n' : c;   /* normalise CR → LF */
+    }
+
+    /* PS/2 ring buffer (interrupt-driven) */
+    if (kbd_head != kbd_tail)
+        return kbd_buf[kbd_tail++];
 
     return 0;
 }
@@ -1460,6 +1471,18 @@ unsigned int isr_handler(struct registers *r)
 
     } else if (r->int_no < 48) {
         /* Hardware IRQ */
+        if (r->int_no == 33) {
+            /* IRQ1 — PS/2 keyboard: decode scancode and push to ring buffer */
+            unsigned char sc = inb(KBD_DATA);
+            char c = kbd_decode(sc);
+            if (c) {
+                unsigned char next = kbd_head + 1;
+                if (next != kbd_tail)        /* drop silently if buffer full */
+                    kbd_buf[kbd_head++] = c;
+            }
+            outb(0x20, 0x20);   /* EOI to master PIC */
+            return 0;
+        }
         if (r->int_no == 32) {
             /* IRQ0 — PIT tick */
             int si;

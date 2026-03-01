@@ -210,8 +210,8 @@ void pit_init(void)
     outb(PIT_CMD, 0x36);                   /* channel 0, lo/hi byte, mode 3 (square wave) */
     outb(PIT_CH0, (uint8_t)(divisor & 0xFF));
     outb(PIT_CH0, (uint8_t)(divisor >> 8));
-    /* Unmask IRQ0 (bit 0) in master PIC; all other IRQs remain masked */
-    outb(PIC1_DATA, 0xFE);
+    /* Unmask IRQ0 (PIT) and IRQ1 (PS/2 keyboard) in master PIC */
+    outb(PIC1_DATA, 0xFC);
 }
 
 /* ============================================================
