@@ -20,6 +20,7 @@ Working directory on the development machine: `/tmp/os`
 - **Keyboard**: PS/2 polling via ports 0x60/0x64, scan code set 1, US QWERTY
 - **Serial**: COM1 (0x3F8), 38400 baud — mirrors all VGA output when built with `-DDEBUG`
 - **RTC**: IBM PC RTC via ports 0x70/0x71
+- **PIT**: 8253 channel 0 at 100 Hz (IRQ0 → INT 32); `g_ticks` counter drives `sleep()` — the only active hardware IRQ; all others remain masked
 - **IDE disk**: ATA PIO, primary channel (0x1F0–0x1F7), master drive, LBA28
   - `disk.img` (4 MB raw) mounted as `-drive if=ide` in QEMU
   - persistent boot counter stored in FAT16 file `BOOT.TXT`
@@ -40,7 +41,7 @@ TSS holds a separate 4 KB kernel stack (`tss_stack[]`); `tss.esp0` is updated in
 ## Interrupts
 - IDT fully set up (256 entries)
 - PIC 8259 remapped: IRQ 0-7 → INT 32-39, IRQ 8-15 → INT 40-47
-- All IRQs masked (polling used for keyboard and disk)
+- IRQ0 (PIT, 100 Hz) active; all other IRQs masked (polling used for keyboard and disk)
 - INT 0x80 gate (DPL=3) — fully implemented syscall interface
 - CPU exceptions → kernel panic: full-screen red/yellow display with register dump + halt
 - **#PF from ring 3** → prints "Segmentation fault", exit code 139, returns to shell
@@ -193,10 +194,10 @@ They are installed in `/bin` but are not intended as interactive user utilities.
 boot/boot_ide.asm      16-bit MBR bootloader (NASM, -f bin); LBA INT 13h AH=0x42
 kernel/entry.asm       32-bit kernel entry (_start → kernel_main); exec_run (IRET to ring 3)
 kernel/isr.asm         ISR stubs for INT 0-47 + 128
-kernel/idt.c           GDT + TSS setup (gdt_init), IDT setup, PIC remapping
+kernel/idt.c           GDT + TSS setup (gdt_init), IDT setup, PIC remapping, pit_init (100 Hz)
 kernel/kernel.c        paging_init (PSE), PMM include, PCB (struct process, g_procs),
                        process_create/destroy, VGA, keyboard, serial, ATA,
-                       syscalls 0-17, panic_screen, kernel_main
+                       syscalls 0-19, panic_screen, kernel_main
 kernel/pmm.c           bitmap physical memory manager (pmm_init, pmm_alloc,
                        pmm_alloc_contiguous, pmm_free, pmm_total, pmm_count_used)
 kernel/pmm.h           PMM public API
@@ -304,7 +305,10 @@ qemu-system-i386 \
 - [x] Path support in FAT16 (absolute + multi-component paths in open/write/delete/mkdir/chdir)
 - [x] Path length limit 127 bytes enforced with user-visible errors
 - [x] SYS_MEMINFO (syscall 17) + `free` utility — physical/virtual memory stats in kB
-- [x] Automated test suite (12 tests, pexpect + QEMU)
+- [x] SYS_SBRK (syscall 18) — heap growth via `sbrk()`; `bin/malloc.h` first-fit allocator on top
+- [x] PIT 8253 timer at 100 Hz (IRQ0 → INT 32); `g_ticks` counter
+- [x] SYS_SLEEP (syscall 19) + `sleep()` wrapper — hlt-based sleep, 10 ms granularity
+- [x] Automated test suite (15 tests, pexpect + QEMU)
 
 ## User preferences
 - All code comments, commit messages and documentation: **English only**

@@ -27,10 +27,13 @@ make test
 - **Keyboard**: PS/2 polling, scan code set 1, US QWERTY, arrow keys supported
 - **Filesystem**: FAT16 on the same IDE disk image, read/write via ATA PIO; supports
   absolute and relative paths, subdirectories, create/delete/rename
-- **Syscalls**: 18 syscalls via `int 0x80` — EAX = number, EBX/ECX/EDX = arguments,
+- **Timer**: PIT 8253 channel 0 at 100 Hz (IRQ0 → INT 32); `g_ticks` counter drives
+  `sleep()` — the only active hardware IRQ; all others remain masked.
+- **Syscalls**: 20 syscalls via `int 0x80` — EAX = number, EBX/ECX/EDX = arguments,
   return value in EAX. Cover I/O (`read`/`write`), file access (`open`/`close`),
   directory ops (`readdir`/`mkdir`/`unlink`/`rename`/`chdir`), process management
-  (`exec`/`exit`), memory (`sbrk`), and hardware helpers (`setpos`/`clrscr`/`getchar`).
+  (`exec`/`exit`), memory (`sbrk`), timing (`sleep`), and hardware helpers
+  (`setpos`/`clrscr`/`getchar`).
 - **Programs**: freestanding flat 32-bit binaries linked at `0x400000`, stored in `/bin` on
   FAT16 without extension. Include `bin/os.h` for all syscall wrappers — no libc needed.
 - **Physical memory (PMM)**: bitmap allocator manages ~127 MB (0x100000–0x7FFFFFFF,
@@ -218,6 +221,7 @@ automated test suite (`make test`). They are not interactive user utilities.
 | `t_panic`  | Calls `kernel_panic()` with an optional message → red panic screen + halt |
 | `t_mall1`  | Tests `malloc`: alloc, write, free+reuse, large alloc, exhaustion |
 | `t_mall2`  | Allocates 4 KB with `malloc`, writes within bounds, then overflows → segfault |
+| `t_sleep`  | Calls `sleep(1000)`, verifies return value 0, prints "sleep: OK" |
 
 ---
 
@@ -408,6 +412,22 @@ struct meminfo {
 ---
 
 ```c
+void *sbrk(unsigned int n);
+```
+Extend the heap by `n` bytes. Returns the old break address (first byte of new region), or
+`(void *)-1` on failure. Used by `bin/malloc.h` to back dynamic allocation.
+
+---
+
+```c
+int sleep(unsigned int ms);
+```
+Sleep for at least `ms` milliseconds. Returns `0`.
+Granularity: 10 ms (PIT at 100 Hz). The CPU halts between timer ticks — no busy-waiting.
+
+---
+
+```c
 void outb(unsigned short port, unsigned char val);
 unsigned char inb(unsigned short port);
 ```
@@ -434,6 +454,7 @@ Direct x86 I/O port access. Available from ring 3 because the kernel sets `IOPL=
 | free | Phys/Virt rows present, total=130048 kB, kB units, (2 procs) |
 | t_mall1 | malloc alloc/write/free+reuse/large alloc/exhaustion → "malloc: OK" |
 | t_mall2 | malloc 4 KB alloc + overflow past boundary → segfault |
+| t_sleep | `t_sleep` calls `sleep(1000)` and prints "sleep: OK" |
 | t_panic | `t_panic` prints `[PANIC]` on serial and halts the system (run last) |
 
 ---
