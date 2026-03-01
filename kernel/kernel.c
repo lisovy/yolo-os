@@ -597,67 +597,8 @@ static void serial_hex(unsigned int val)
         serial_putchar(h[(val >> (i*4)) & 0xF]);
 }
 
-static void panic_screen(const char *msg, struct registers *r)
-{
-    volatile unsigned short *vga = (volatile unsigned short *)0xB8000;
-
-    /* Fill entire screen with red background */
-    for (int i = 0; i < 80 * 25; i++)
-        vga[i] = ((unsigned short)PANIC_BODY << 8) | ' ';
-
-    /* Title (centred) */
-    ps_str(vga,  0, 30, "*** KERNEL PANIC ***", PANIC_HDR);
-
-    /* Reason */
-    ps_str(vga,  2,  1, "Reason: ", PANIC_HDR);
-    ps_str(vga,  2,  9, msg,        PANIC_BODY);
-
-    /* General purpose register section */
-    ps_str(vga,  4,  1, "General Purpose Registers", PANIC_HDR);
-    ps_reg(vga,  5,  2, "EAX",    r->eax,    PANIC_BODY);
-    ps_reg(vga,  5, 22, "EBX",    r->ebx,    PANIC_BODY);
-    ps_reg(vga,  5, 42, "ECX",    r->ecx,    PANIC_BODY);
-    ps_reg(vga,  5, 62, "EDX",    r->edx,    PANIC_BODY);
-    ps_reg(vga,  6,  2, "ESI",    r->esi,    PANIC_BODY);
-    ps_reg(vga,  6, 22, "EDI",    r->edi,    PANIC_BODY);
-    ps_reg(vga,  6, 42, "EBP",    r->ebp,    PANIC_BODY);
-    ps_reg(vga,  6, 62, "ESP",    r->esp,    PANIC_BODY);
-    ps_reg(vga,  7,  2, "EIP",    r->eip,    PANIC_BODY);
-    ps_reg(vga,  7, 22, "EFLAGS", r->eflags, PANIC_BODY);
-    ps_reg(vga,  7, 42, "CS",     r->cs,     PANIC_BODY);
-    ps_reg(vga,  7, 62, "DS",     r->ds,     PANIC_BODY);
-
-    /* Control register section */
-    ps_str(vga,  9,  1, "Control Registers", PANIC_HDR);
-    unsigned int cr0, cr2, cr3, cr4;
-    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
-    __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
-    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
-    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
-    ps_reg(vga, 10,  2, "CR0", cr0, PANIC_BODY);
-    ps_reg(vga, 10, 22, "CR2", cr2, PANIC_BODY);
-    ps_reg(vga, 10, 42, "CR3", cr3, PANIC_BODY);
-    ps_reg(vga, 10, 62, "CR4", cr4, PANIC_BODY);
-
-    /* Serial dump */
-    serial_print("[PANIC] "); serial_print(msg); serial_putchar('\n');
-    serial_print("[PANIC] EAX="); serial_hex(r->eax);
-    serial_print(" EBX=");        serial_hex(r->ebx);
-    serial_print(" ECX=");        serial_hex(r->ecx);
-    serial_print(" EDX=");        serial_hex(r->edx); serial_putchar('\n');
-    serial_print("[PANIC] ESI="); serial_hex(r->esi);
-    serial_print(" EDI=");        serial_hex(r->edi);
-    serial_print(" EBP=");        serial_hex(r->ebp);
-    serial_print(" ESP=");        serial_hex(r->esp); serial_putchar('\n');
-    serial_print("[PANIC] EIP="); serial_hex(r->eip);
-    serial_print(" EFLAGS=");     serial_hex(r->eflags);
-    serial_print(" CS=");         serial_hex(r->cs);
-    serial_print(" DS=");         serial_hex(r->ds);  serial_putchar('\n');
-    serial_print("[PANIC] CR0="); serial_hex(cr0);
-    serial_print(" CR2=");        serial_hex(cr2);
-    serial_print(" CR3=");        serial_hex(cr3);
-    serial_print(" CR4=");        serial_hex(cr4);    serial_putchar('\n');
-}
+/* Forward declaration — full body is defined after the PCB section (needs g_current, g_ticks). */
+static void panic_screen(const char *msg, struct registers *r);
 
 /* ============================================================
  * Syscall interface — int 0x80
@@ -895,6 +836,7 @@ typedef enum { PROC_UNUSED=0, PROC_RUNNING, PROC_READY, PROC_ZOMBIE,
 struct process {
     int            pid;
     proc_state_t   state;
+    char           name[16];                   /* program name (e.g. "sh", "hello")   */
 
     unsigned int   cr3;                        /* physical address of page directory */
     unsigned int   parent_cr3;                 /* physical address of parent page dir */
@@ -921,6 +863,152 @@ static struct process  g_procs[PROC_MAX_PROCS];
 static struct process *g_current = 0;
 
 static void process_destroy(struct process *p);  /* forward declaration */
+
+/* ── panic screen — full implementation (needs g_current, g_ticks, PCB types) ─── */
+
+/* Write a decimal integer at (row, col); returns new col. */
+static int ps_dec(volatile unsigned short *v, int row, int col,
+                  unsigned int val, unsigned char a)
+{
+    char buf[10];
+    int  len = 0;
+    if (val == 0) { buf[len++] = '0'; }
+    else { unsigned int n = val; while (n) { buf[len++] = (char)('0' + n % 10); n /= 10; } }
+    for (int i = len - 1; i >= 0; i--)
+        v[row * 80 + col++] = ((unsigned short)a << 8) | (unsigned char)buf[i];
+    return col;
+}
+
+static const char *proc_state_name(proc_state_t s)
+{
+    switch (s) {
+    case PROC_UNUSED:   return "UNUSED";
+    case PROC_RUNNING:  return "RUNNING";
+    case PROC_READY:    return "READY";
+    case PROC_WAITING:  return "WAITING";
+    case PROC_SLEEPING: return "SLEEPING";
+    case PROC_ZOMBIE:   return "ZOMBIE";
+    default:            return "?";
+    }
+}
+
+static void panic_screen(const char *msg, struct registers *r)
+{
+    volatile unsigned short *vga = (volatile unsigned short *)0xB8000;
+
+    /* Fill entire screen with red background */
+    for (int i = 0; i < 80 * 25; i++)
+        vga[i] = ((unsigned short)PANIC_BODY << 8) | ' ';
+
+    /* Title (centred) */
+    ps_str(vga,  0, 30, "*** KERNEL PANIC ***", PANIC_HDR);
+
+    /* Reason */
+    ps_str(vga,  2,  1, "Reason: ", PANIC_HDR);
+    ps_str(vga,  2,  9, msg,        PANIC_BODY);
+
+    /* General purpose registers */
+    ps_str(vga,  4,  1, "General Purpose Registers", PANIC_HDR);
+    ps_reg(vga,  5,  2, "EAX",    r->eax,    PANIC_BODY);
+    ps_reg(vga,  5, 22, "EBX",    r->ebx,    PANIC_BODY);
+    ps_reg(vga,  5, 42, "ECX",    r->ecx,    PANIC_BODY);
+    ps_reg(vga,  5, 62, "EDX",    r->edx,    PANIC_BODY);
+    ps_reg(vga,  6,  2, "ESI",    r->esi,    PANIC_BODY);
+    ps_reg(vga,  6, 22, "EDI",    r->edi,    PANIC_BODY);
+    ps_reg(vga,  6, 42, "EBP",    r->ebp,    PANIC_BODY);
+    ps_reg(vga,  6, 62, "ESP",    r->esp,    PANIC_BODY);
+    ps_reg(vga,  7,  2, "EIP",    r->eip,    PANIC_BODY);
+    ps_reg(vga,  7, 22, "EFLAGS", r->eflags, PANIC_BODY);
+    ps_reg(vga,  7, 42, "CS",     r->cs,     PANIC_BODY);
+    ps_reg(vga,  7, 62, "DS",     r->ds,     PANIC_BODY);
+
+    /* Control registers */
+    ps_str(vga,  9,  1, "Control Registers", PANIC_HDR);
+    unsigned int cr0, cr2, cr3, cr4;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    ps_reg(vga, 10,  2, "CR0", cr0, PANIC_BODY);
+    ps_reg(vga, 10, 22, "CR2", cr2, PANIC_BODY);
+    ps_reg(vga, 10, 42, "CR3", cr3, PANIC_BODY);
+    ps_reg(vga, 10, 62, "CR4", cr4, PANIC_BODY);
+
+    /* Segment registers (ES / FS / GS; CS and DS already above) */
+    ps_str(vga, 12,  1, "Segment Registers", PANIC_HDR);
+    ps_reg(vga, 13,  2, "ES",  r->es, PANIC_BODY);
+    ps_reg(vga, 13, 22, "FS",  r->fs, PANIC_BODY);
+    ps_reg(vga, 13, 42, "GS",  r->gs, PANIC_BODY);
+
+    /* Exception: INT number, error code, uptime ticks */
+    ps_str(vga, 15,  1, "Exception", PANIC_HDR);
+    ps_reg(vga, 16,  2, "INT",    r->int_no,   PANIC_BODY);
+    ps_reg(vga, 16, 22, "ERR",    r->err_code, PANIC_BODY);
+    ps_str(vga, 16, 42, "Ticks ", PANIC_HDR);
+    ps_dec(vga, 16, 48, g_ticks,  PANIC_BODY);
+
+    /* For #PF (INT 14): decode the error code into human-readable flags */
+    if (r->int_no == 14) {
+        unsigned int e = r->err_code;
+        int col = 2;
+        ps_str(vga, 17, col, "#PF:", PANIC_HDR); col += 5;
+        ps_str(vga, 17, col, (e & 1)  ? "PROT-VIOL"   : "NOT-PRESENT", PANIC_BODY); col += 12;
+        ps_str(vga, 17, col, (e & 2)  ? "WRITE"       : "READ",        PANIC_BODY); col +=  6;
+        ps_str(vga, 17, col, (e & 4)  ? "USER"        : "KERNEL",      PANIC_BODY); col +=  7;
+        ps_str(vga, 17, col, (e & 16) ? "INSTR-FETCH" : "DATA",        PANIC_BODY);
+    }
+
+    /* Current process */
+    ps_str(vga, 19,  1, "Current Process", PANIC_HDR);
+    if (g_current) {
+        int col = 2;
+        ps_str(vga, 20, col, "PID ",  PANIC_HDR); col += 4;
+        col = ps_dec(vga, 20, col, (unsigned int)g_current->pid, PANIC_BODY);
+        col += 2;
+        ps_str(vga, 20, col, "Name ", PANIC_HDR); col += 5;
+        ps_str(vga, 20, col, g_current->name, PANIC_BODY);
+        col += 16;
+        ps_str(vga, 20, col, "State ", PANIC_HDR); col += 6;
+        ps_str(vga, 20, col, proc_state_name(g_current->state), PANIC_BODY);
+        col += 8;
+        ps_str(vga, 20, col, "BG ", PANIC_HDR); col += 3;
+        ps_str(vga, 20, col, g_current->is_background ? "yes" : "no", PANIC_BODY);
+    } else {
+        ps_str(vga, 20, 2, "(no process)", PANIC_BODY);
+    }
+
+    /* Serial dump */
+    serial_print("[PANIC] "); serial_print(msg); serial_putchar('\n');
+    serial_print("[PANIC] EAX="); serial_hex(r->eax);
+    serial_print(" EBX=");        serial_hex(r->ebx);
+    serial_print(" ECX=");        serial_hex(r->ecx);
+    serial_print(" EDX=");        serial_hex(r->edx); serial_putchar('\n');
+    serial_print("[PANIC] ESI="); serial_hex(r->esi);
+    serial_print(" EDI=");        serial_hex(r->edi);
+    serial_print(" EBP=");        serial_hex(r->ebp);
+    serial_print(" ESP=");        serial_hex(r->esp); serial_putchar('\n');
+    serial_print("[PANIC] EIP="); serial_hex(r->eip);
+    serial_print(" EFLAGS=");     serial_hex(r->eflags);
+    serial_print(" CS=");         serial_hex(r->cs);
+    serial_print(" DS=");         serial_hex(r->ds);  serial_putchar('\n');
+    serial_print("[PANIC] ES=");  serial_hex(r->es);
+    serial_print(" FS=");         serial_hex(r->fs);
+    serial_print(" GS=");         serial_hex(r->gs);  serial_putchar('\n');
+    serial_print("[PANIC] CR0="); serial_hex(cr0);
+    serial_print(" CR2=");        serial_hex(cr2);
+    serial_print(" CR3=");        serial_hex(cr3);
+    serial_print(" CR4=");        serial_hex(cr4);    serial_putchar('\n');
+    serial_print("[PANIC] INT="); serial_hex(r->int_no);
+    serial_print(" ERR=");        serial_hex(r->err_code);
+    serial_print(" TICKS=");      serial_hex(g_ticks); serial_putchar('\n');
+    if (g_current) {
+        serial_print("[PANIC] PID=");
+        serial_hex((unsigned int)g_current->pid);
+        serial_print(" NAME="); serial_print(g_current->name);
+        serial_print(" STATE="); serial_print(proc_state_name(g_current->state));
+        serial_putchar('\n');
+    }
+}
 
 /* Round-robin: find next READY or RUNNING process (never returns g_current). */
 static struct process *pick_next_process(void)
@@ -970,6 +1058,11 @@ static struct process *process_create(const char *name, const char *args)
     p->heap_break    = HEAP_BASE;
     p->phys_kstack   = 0;
     p->is_background = 0;
+    {   /* copy name, truncate to 15 chars */
+        int ni = 0;
+        while (name[ni] && ni < 15) { p->name[ni] = name[ni]; ni++; }
+        p->name[ni] = '\0';
+    }
 
     /* Declare pt early so the fail: block can reference it safely */
     unsigned int *pt = (unsigned int *)0;
