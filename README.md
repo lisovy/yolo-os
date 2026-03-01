@@ -24,7 +24,9 @@ make test
 - **CPU**: x86, 32-bit protected mode; kernel in ring 0, user programs in ring 3
 - **Boot**: 16-bit MBR bootloader → ATA PIO LBA read → jumps to 32-bit kernel at `0x10000`
 - **Video**: VGA text mode 80×25 (`0xB8000`); user programs may switch to Mode 13h graphics
-- **Keyboard**: PS/2 polling, scan code set 1, US QWERTY, arrow keys supported
+- **Keyboard**: PS/2 via IRQ1 interrupt; scancode decoded in IRQ handler, pushed to a
+  256-byte ring buffer; `kbd_getchar()` drains the buffer non-blocking; COM1 serial is
+  also checked so automated tests can inject keystrokes via `-serial stdio`
 - **Filesystem**: FAT16 on the same IDE disk image, read/write via ATA PIO; supports
   absolute and relative paths, subdirectories, create/delete/rename
 - **Timer**: PIT 8253 channel 0 at 100 Hz (IRQ0 → INT 32); `g_ticks` counter drives

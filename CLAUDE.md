@@ -18,7 +18,9 @@ Working directory on the development machine: `/tmp/os`
 
 ## Hardware access
 - **Video**: VGA text mode, direct writes to 0xB8000 (80×25)
-- **Keyboard**: PS/2 polling via ports 0x60/0x64, scan code set 1, US QWERTY
+- **Keyboard**: PS/2 via IRQ1 (INT 33); scancode decoded in interrupt handler, results
+  pushed to 256-byte ring buffer; `kbd_getchar()` drains the buffer; COM1 serial input
+  also checked in `kbd_getchar()` so automated tests work via `-serial stdio`
 - **Serial**: COM1 (0x3F8), 38400 baud — mirrors all VGA output when built with `-DDEBUG`
 - **RTC**: IBM PC RTC via ports 0x70/0x71
 - **PIT**: 8253 channel 0 at 100 Hz (IRQ0 → INT 32); `g_ticks` counter drives `sleep()` — the only active hardware IRQ; all others remain masked
@@ -43,7 +45,7 @@ updated to `phys_kstack + 4096` before each ring-3 run so ring-3 → ring-0 tran
 ## Interrupts
 - IDT fully set up (256 entries)
 - PIC 8259 remapped: IRQ 0-7 → INT 32-39, IRQ 8-15 → INT 40-47
-- IRQ0 (PIT, 100 Hz) active; all other IRQs masked (polling used for keyboard and disk)
+- IRQ0 (PIT, 100 Hz) and IRQ1 (PS/2 keyboard) active; all other IRQs masked (disk uses polling)
 - INT 0x80 gate (DPL=3) — fully implemented syscall interface
 - CPU exceptions → kernel panic: full-screen red/yellow display with register dump + halt
 - **#PF from ring 3** → prints "Segmentation fault", exit code 139, returns to shell
@@ -330,6 +332,7 @@ qemu-system-i386 \
       `PROC_WAITING` / `PROC_ZOMBIE` states; lazy zombie reuse in `process_create()`
 - [x] Background process execution (`cmd &`): `SYS_EXEC` EDX flag (EXEC_FG=0 / EXEC_BG=1);
       `exec_bg()` wrapper in `bin/os.h`; `t_bg` test program
+- [x] PS/2 keyboard via IRQ1 interrupt + 256-byte ring buffer; `kbd_decode()` in handler
 - [x] Automated test suite (16 tests, pexpect + QEMU)
 
 ## User preferences
